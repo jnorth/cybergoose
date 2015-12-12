@@ -1,0 +1,44 @@
+{
+  "name": "sftp-sync",
+  "version": "1.0.0",
+  "description": "A simple SFTP client.",
+  "author": "Joseph North <north@sublink.ca>",
+  "license": "MIT",
+  "dependencies": {},
+  "scripts": {
+    "build:templates": "cp -r assets/templates app/assets",
+    "build:scripts": "jspm bundle-sfx assets/scripts/app.js app/assets/app.js",
+    "build:styles": "postcss --use autoprefixer -o app/assets/app.css assets/styles/app.css",
+    "build": "npm run build:templates && npm run build:scripts && npm run build:styles"
+  },
+  "devDependencies": {
+    "autoprefixer": "^6.1.2",
+    "babel-cli": "^6.2.0",
+    "babel-preset-es2015": "^6.3.13",
+    "babel-preset-stage-2": "^6.3.13",
+    "jspm": "^0.16.15",
+    "postcss-cli": "^2.3.2",
+    "react": "^0.14.3",
+    "react-dom": "^0.14.3"
+  },
+  "babel": {
+    "presets": [
+      "es2015",
+      "stage-2"
+    ]
+  },
+  "jspm": {
+    "configFile": "jspm-config.js",
+    "dependencies": {
+      "jquery": "github:components/jquery@^2.1.4",
+      "react": "npm:react@^0.14.3",
+      "react-dom": "npm:react-dom@^0.14.3",
+      "redux": "npm:redux@^3.0.4"
+    },
+    "devDependencies": {
+      "babel": "npm:babel-core@^5.8.24",
+      "babel-runtime": "npm:babel-runtime@^5.8.24",
+      "core-js": "npm:core-js@^1.1.4"
+    }
+  }
+}
