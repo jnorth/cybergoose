@@ -1,0 +1,27 @@
+.tab {
+  padding: 8px 14px;
+  color: #CFD8DC;
+  font-family: var(--font);
+  font-size: 14px;
+  letter-spacing: 0.5px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  appearance: none;
+}
+
+.tab:active,
+.tab:focus {
+  text-decoration: underline;
+  outline: none;
+}
+
+.tab.is-active {
+  color: #000;
+  background: #f0f0f0;
+}
+
+.tab-bookmarks.is-active {
+  color: #fff;
+  background: #374046;
+}

@@ -7,19 +7,24 @@
   "dependencies": {},
   "scripts": {
     "build:templates": "cp -r assets/templates app/assets",
-    "build:scripts": "jspm bundle-sfx assets/scripts/app.js app/assets/app.js",
-    "build:styles": "postcss --use autoprefixer -o app/assets/app.css assets/styles/app.css",
-    "build": "npm run build:templates && npm run build:scripts && npm run build:styles"
+    "build:scripts": "jspm bundle-sfx assets/app.js app/assets/app.js",
+    "build:styles": "postcss --use postcss-import --use postcss-extend --use postcss-custom-properties --use autoprefixer -o app/assets/app.css assets/app.css",
+    "build": "npm run build:templates & npm run build:scripts & npm run build:styles & wait",
+    "watch": "watch 'npm run build' assets"
   },
   "devDependencies": {
     "autoprefixer": "^6.1.2",
-    "babel-cli": "^6.2.0",
+    "babel-cli": "^6.3.17",
     "babel-preset-es2015": "^6.3.13",
     "babel-preset-stage-2": "^6.3.13",
-    "jspm": "^0.16.15",
+    "jspm": "^0.16.19",
     "postcss-cli": "^2.3.2",
+    "postcss-custom-properties": "^5.0.0",
+    "postcss-extend": "^1.0.1",
+    "postcss-import": "^7.1.3",
     "react": "^0.14.3",
-    "react-dom": "^0.14.3"
+    "react-dom": "^0.14.3",
+    "watch": "^0.17.1"
   },
   "babel": {
     "presets": [
@@ -30,6 +35,8 @@
   "jspm": {
     "configFile": "jspm-config.js",
     "dependencies": {
+      "classnames": "npm:classnames@^2.2.1",
+      "fetch": "github:github/fetch@^0.10.1",
       "jquery": "github:components/jquery@^2.1.4",
       "react": "npm:react@^0.14.3",
       "react-dom": "npm:react-dom@^0.14.3",

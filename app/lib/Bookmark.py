@@ -5,7 +5,7 @@ class Bookmark:
     self.id = id if id else uuid.uuid4()
     self.name = name
     self.host = host
-    self.port = port
+    self.port = int(port)
     self.username = username
     self.password = password
     self.path = path
@@ -27,7 +27,7 @@ class Bookmark:
     if "id" in dict: bookmark.id = dict["id"]
     if "name" in dict: bookmark.name = dict["name"]
     if "host" in dict: bookmark.host = dict["host"]
-    if "port" in dict: bookmark.port = dict["port"]
+    if "port" in dict: bookmark.port = int(dict["port"])
     if "username" in dict: bookmark.username = dict["username"]
     if "password" in dict: bookmark.password = dict["password"]
     if "path" in dict: bookmark.path = dict["path"]

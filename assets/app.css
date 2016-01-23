@@ -1,3 +1,9 @@
+/* Variables */
+
+:root {
+  --font: system, -apple-system, ".SFNSDisplay-Regular", "Helvetica Neue", "Lucida Grande";
+}
+
 html {
   box-sizing: border-box;
 }
@@ -12,16 +18,14 @@ body {
 }
 
 body {
-  padding: 5vw;
-  font-family: "Helvetica Neue", sans;
+  font-family: var(--font);
   background: #f0f0f0;
 }
 
-/* Toolbar */
+@import "components/bookmark/style.css";
 
-.toolbar {
-
-}
+@import "components/Toolbar/style.css";
+@import "components/ToolbarButton/style.css";
 
 /* Queue */
 
@@ -51,7 +55,11 @@ body {
   color: #444;
   font-weight: 300;
   letter-spacing: 0.04em;
-  transition: background 100ms cubic-bezier(0.645, 0.045, 0.355, 1.000); ;
+  transition: background 100ms cubic-bezier(0.645, 0.045, 0.355, 1.000);
+}
+
+.item.is-directory {
+  font-weight: bold;
 }
 
 .item:hover {

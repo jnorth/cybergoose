@@ -3,11 +3,15 @@ from bottle import Bottle, request, static_file
 from lib.Database import Database
 from lib.Bookmark import Bookmark
 from lib.Application import Application
+from lib.Client import Client
+from lib.Transfer import Transfer
 
 
 # Create application
 app = Application(Database("/data/db.json"))
 
+def web_error(message):
+  return { "success":False, "error":message }
 
 # Routes
 web = Bottle()
@@ -37,33 +41,48 @@ def web_remove_bookmark():
   app.remove_bookmark(id)
   return { "success":True }
 
+@web.route("/connect", method="POST")
+def web_connect():
+  bookmark_id = request.forms.get("bookmark_id")
+  if bookmark_id is None:
+    return web_error("No bookmark provided.")
+
+  connection = app.connect(bookmark_id)
+  if connection == False:
+    return web_error("Invalid bookmark.")
+
+  return { "success":True }
+
 @web.route("/listing", method="POST")
 def web_listing():
   path = request.forms.get("path")
   if path is None:
-    return { "success":False, "error":"No path provided." }
+    return web_error("No path provided.")
 
-  bookmark = app.get_current_bookmark()
-  if bookmark is None:
-    return { "success":False, "error":"No active connections." }
+  connection = app.get_connection()
+  if connection is None:
+    return web_error("No active connections.")
 
-  return { "success":False, "error":"Not implemented yet." }
+  listing = connection.list_dir(path)
+  response = [resource.to_json() for resource in listing]
+
+  return { "success":True, "listing":response }
 
 @web.route("/downloads", method="GET")
 def web_queue():
-  return { "success":True, "queue":worker.queued() }
+  return { "success":True, "queue":app.queued() }
 
 @web.route("/downloads", method="POST")
 def web_download():
   path = request.forms.get("path")
   if path is None:
-    return { "success":False, "error":"No path provided." }
+    return web_error("No path provided.")
 
-  bookmark = app.get_current_bookmark()
-  if bookmark is None:
-    return { "success":False, "error":"No active connection." }
+  connection = app.get_connection()
+  if connection is None:
+    return web_error("No active connection.")
 
-  transfer = Transfer(bookmark=bookmark, path=path)
+  transfer = Transfer(bookmark=connection.get_bookmark(), path=path)
   app.enqueueTransfer(transfer)
   return { "success":True }
 

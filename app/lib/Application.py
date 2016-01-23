@@ -1,18 +1,39 @@
 from Queue import Queue
+from Client import Client
+from Worker import Worker
 
 class Application:
   def __init__(self, db):
-    self.db = db
-    self.workers = []
     self.queue = Queue()
+
+    worker = Worker(self.queue)
+    worker.start()
+    self.workers = [worker]
+
+    self.client = None
+
+    self.db = db
     self.bookmarks = self.db.load_bookmarks()
-    self.current_bookmark = None
 
   def get_bookmarks(self):
     return self.bookmarks
 
-  def get_current_bookmark(self):
-    return self.current_bookmark
+  def get_connection(self):
+    return self.client
+
+  def connect(self, bookmark_id):
+    if self.client:
+      if self.client.get_bookmark().id == bookmark_id:
+        return self.client
+      else:
+        self.client.close()
+
+    for bookmark in self.bookmarks:
+      if bookmark.id == bookmark_id:
+        self.client = Client(bookmark)
+        return self.client
+
+    return False
 
   def add_bookmark(self, bookmark):
     for b in self.bookmarks:
