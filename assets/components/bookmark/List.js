@@ -1,22 +1,33 @@
-import DOM from '../dom';
+import React from 'react';
+import { dom } from 'domb';
 import BookmarkItem from './Item';
+import AddButton from './AddButton';
 
-import connect from '../../model/actions/connect';
+const div = dom(React, 'div');
+const bookmarkItem = dom(React, BookmarkItem);
+const addButton = dom(React, AddButton);
 
-export default ({ bookmarks }) => {
-  const { div } = DOM;
-  const bookmarkItem = DOM.factory(BookmarkItem);
-
+export default ({ app }) => {
   return div({
     className: 'bookmarks-list',
-    children: bookmarks.map((bookmark) => {
-      return bookmarkItem({
-        key: bookmark.id,
-        bookmark,
-        onClick: (event) => {
-          connect(bookmark);
-        },
-      });
-    }),
+    children: [
+
+      // Bookmarks
+      ...app.bookmarks.state.map((bookmark) => {
+        return bookmarkItem({
+          key: bookmark.id,
+          bookmark,
+          onClick: (event) => {
+            app.connect(bookmark);
+          },
+        });
+      }),
+
+      // Add bookmark button
+      addButton({
+        key: 'bookmark-add',
+      }),
+
+    ],
   });
 }

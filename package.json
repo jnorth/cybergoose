@@ -10,31 +10,27 @@
     "build:scripts": "jspm bundle-sfx assets/app.js app/assets/app.js",
     "build:styles": "postcss --use postcss-import --use postcss-extend --use postcss-custom-properties --use autoprefixer -o app/assets/app.css assets/app.css",
     "build": "npm run build:templates & npm run build:scripts & npm run build:styles & wait",
-    "watch": "watch 'npm run build' assets"
+    "watch:scripts": "chokidar 'assets/**/*.js' -c 'npm run build:scripts; tput bel'",
+    "watch:styles": "chokidar 'assets/**/*.css' -c 'npm run build:styles; tput bel'",
+    "watch": "npm run watch:scripts & npm run watch:styles"
   },
   "devDependencies": {
     "autoprefixer": "^6.1.2",
-    "babel-cli": "^6.3.17",
-    "babel-preset-es2015": "^6.3.13",
-    "babel-preset-stage-2": "^6.3.13",
+    "chokidar-cli": "^1.2.0",
     "jspm": "^0.16.19",
+    "jspm-local": "^1.0.2",
     "postcss-cli": "^2.3.2",
     "postcss-custom-properties": "^5.0.0",
     "postcss-extend": "^1.0.1",
-    "postcss-import": "^7.1.3",
-    "watch": "^0.17.1"
-  },
-  "babel": {
-    "presets": [
-      "es2015",
-      "stage-2"
-    ]
+    "postcss-import": "^7.1.3"
   },
   "jspm": {
     "configFile": "jspm-config.js",
     "dependencies": {
       "classnames": "npm:classnames@^2.2.1",
+      "domb": "github:jnorth/domb@^0.0.2",
       "fetch": "github:github/fetch@^0.10.1",
+      "flax": "github:jnorth/flax@^0.0.1",
       "react": "npm:react@^0.14.6",
       "react-dom": "npm:react-dom@^0.14.6",
       "redux": "npm:redux@^3.0.5"

@@ -1,5 +1,9 @@
+.view-bookmarks {
+  min-height: 100%;
+  background-color: #374046;
+}
+
 .bookmarks-list {
-  /*position: absolute;*/
   top: 0;
   right: 0;
   bottom: 0;
@@ -9,27 +13,7 @@
   background: #374046;
 }
 
-
-.bookmark-header {
-  display: flex;
-  justify-content: space-between;
-  padding: 15px;
-  background: rgba(0, 0, 0, 0.25);
-}
-
-.bookmark-header-title {
-  opacity: 0.5;
-}
-
-.bookmark-header-add {
-  cursor: pointer;
-}
-
-
-.bookmark-list {
-
-}
-
+/* Bookmark Item */
 
 .bookmark {
   padding: 20px 15px;
@@ -39,40 +23,25 @@
 
 .bookmark-name {
   letter-spacing: 0.5px;
-  opacity: 0.9;
 }
 
 .bookmark-host {
   font-size: 14px;
-  opacity: 0.6;
 }
 
+/* Add Bookmark Button */
 
-.bookmarks-form {
-  max-width: 500px;
-  margin: 40px auto;
+.bookmark-add {
   padding: 20px;
-  background: rgba(0,0,0,.2);
-  border-radius: 5px;
+  text-align: center;
 }
 
-
-
-.form-field {
-
-}
-
-.form-field-title {
-  margin: 0 0 10px 10px;
-  font-size: 14px;
-  opacity: 0.9;
-}
-
-.form-field input {
-  display: block;
-  width: 100%;
-  margin: 0 0 20px;
-  padding: 10px;
+.bookmark-add button {
+  padding: 10px 15px;
+  color: #fff;
+  font-size: 13px;
+  background: rgba(0, 0, 0, 0.2);
   border: 0;
-  background: rgba(0,0,0,.25);
+  border-radius: 5px;
+  cursor: pointer;
 }

@@ -1,10 +1,9 @@
-import DOM from '../dom';
+import React from 'react';
+import { dom } from 'domb';
 
-export default (props) => {
-  const { bookmark, onClick } = props;
+const div = dom(React, 'div');
 
-  const { div } = DOM;
-
+export default ({ bookmark, onClick }) => {
   const host = bookmark.port === 22
     ? bookmark.host
     : `${bookmark.host}:${bookmark.port}`;

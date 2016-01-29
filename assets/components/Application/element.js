@@ -1,29 +1,36 @@
-import DOM from '../dom';
-import Tabbar from './Tabbar';
+import React from 'react';
+import { dom, elif } from 'domb';
+
+import Tabbar from '../Tabbar/element';
 import BookmarkList from '../bookmark/List';
 import Listing from '../Listing/element';
 
-const activeConnection = (state) => {
-  if (state.view !== 'connection') {
+const activeConnection = (app) => {
+  if (app.state.view !== 'connection') {
     return;
   }
 
-  return state.connections[state.connection];
+  return app.connections.state[app.state.connection];
 };
 
-export default ({ state }) => {
-  const { view, bookmarks, connection, connections } = state;
+export default ({ app }) => {
+  // State
+  const { view } = app.state;
+  const bookmarks = app.bookmarks;
+  const connection = activeConnection(app);
 
-  const { div } = DOM;
-  const tabbar = DOM.factory(Tabbar);
-  const bookmarkList = DOM.factory(BookmarkList, view === 'bookmarks');
-  const connectionView = DOM.factory(Listing, view === 'connection');
+  // Elements
+  const div = dom(React, 'div');
+  const tabbar = dom(React, Tabbar);
+  const bookmarkList = elif(view === 'bookmarks', dom(React, BookmarkList));
+  const connectionView = elif(view === 'connection', dom(React, Listing));
 
   return div({
+    className: `view-${view}`,
     content: [
-      tabbar({ view, connection, connections }),
-      bookmarkList({ bookmarks }),
-      connectionView({ connection: activeConnection(state) }),
+      tabbar({ app }),
+      bookmarkList({ app }),
+      connectionView({ connection }),
     ],
   });
 }

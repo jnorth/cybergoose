@@ -1,12 +1,10 @@
+import React from 'react';
 import classnames from 'classnames';
+import { dom } from 'domb';
 
-import DOM from '../dom';
+const button = dom(React, 'button');
 
-export default function render(props) {
-  const { label, active, handler, classes } = props;
-
-  const { button } = DOM;
-
+export default function render({ label, classes, active, handler }) {
   return button({
     content: label,
     className: classnames('tab', classes, {

@@ -17,15 +17,19 @@ body {
   margin: 0;
 }
 
+html,
+body,
+main {
+  height: 100%;
+}
+
 body {
   font-family: var(--font);
   background: #f0f0f0;
 }
 
 @import "components/bookmark/style.css";
-
-@import "components/Toolbar/style.css";
-@import "components/ToolbarButton/style.css";
+@import "components/Tabbar/style.css";
 
 /* Queue */
 

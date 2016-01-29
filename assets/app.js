@@ -1,23 +1,18 @@
 import React from 'react';
 import ReactDOM from 'react-dom';
 
-import sync from './model/sync';
-import { state, subscribe } from './model/store';
-
+import Application from './model/Application';
 import ApplicationView from './components/Application/element';
 
-// Track state history
-subscribe(() => {
-  console.log('STATE:', state());
-});
+const app = new Application();
 
-// Initial Sync
-sync.bookmarks();
+app.subscribe((event) => {
+  console.log(event);
 
-// Render
-subscribe(() => {
   ReactDOM.render(
-    React.createElement(ApplicationView, { state:state() }),
+    React.createElement(ApplicationView, { app }),
     document.querySelector('main')
   );
 });
+
+app.bookmarks.fetch();

@@ -1,6 +1,4 @@
-import afetch from 'fetch';
-
-import addBookmark from '../model/actions/addBookmark';
+import 'fetch';
 
 // Helpers
 
@@ -10,11 +8,11 @@ const parseJSON = (response) => {
 
 const checkStatus = (response) => {
   if (response.status >= 200 && response.status < 300) {
-    return response
+    return response;
   } else {
-    var error = new Error(response.statusText)
-    error.response = response
-    throw error
+    var error = new Error(response.statusText);
+    error.response = response;
+    throw error;
   }
 };
 
@@ -25,39 +23,32 @@ const handleError = (error) => {
 // Bookmarks
 
 const fetchBookmarks = () => {
-  fetch('/bookmarks')
+  return fetch('/bookmarks')
     .catch(handleError)
     .then(checkStatus)
     .then(parseJSON)
-    .then((data) => {
-      for (let bookmark of data.bookmarks) {
-        addBookmark(bookmark);
-      }
-    });
+    .then(data => data.bookmarks);
 };
 
 // Connections
 
 const connect = (bookmark) => {
-  const data = new FormData();
-  data.append('bookmark_id', bookmark.id);
+  const body = new FormData();
+  body.append('bookmark_id', bookmark.id);
 
-  return fetch('/connect', {
-    method: 'post',
-    body: data,
-  })
-  .catch(handleError)
-  .then(checkStatus)
-  .then(parseJSON);
+  return fetch('/connect', { method:'post', body })
+    .catch(handleError)
+    .then(checkStatus)
+    .then(parseJSON);
 };
 
 const listing = (path) => {
-  const data = new FormData();
-  data.append('path', path);
+  const body = new FormData();
+  body.append('path', path);
 
   return fetch('/listing', {
     method: 'post',
-    body: data,
+    body,
   })
   .catch(handleError)
   .then(checkStatus)
@@ -65,12 +56,12 @@ const listing = (path) => {
 };
 
 const download = (path) => {
-  const data = new FormData();
-  data.append('path', path);
+  const body = new FormData();
+  body.append('path', path);
 
   return fetch('/downloads', {
     method: 'post',
-    body: data,
+    body,
   })
   .catch(handleError)
   .then(checkStatus)
