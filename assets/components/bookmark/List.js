@@ -17,8 +17,10 @@ export default ({ app }) => {
         return bookmarkItem({
           key: bookmark.id,
           bookmark,
-          onClick: (event) => {
-            app.connect(bookmark);
+          onActivate: event => app.connect(bookmark),
+          onDelete: event => {
+            event.stopPropagation();
+            app.bookmarks.delete(bookmark.id);
           },
         });
       }),
@@ -26,6 +28,7 @@ export default ({ app }) => {
       // Add bookmark button
       addButton({
         key: 'bookmark-add',
+        action: event => app.setView('bookmarks-form'),
       }),
 
     ],

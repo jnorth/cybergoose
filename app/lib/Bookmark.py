@@ -2,13 +2,17 @@ import uuid
 
 class Bookmark:
   def __init__(self, id=None, name="Untitled", host=None, port=22, username=None, password=None, path="."):
-    self.id = id if id else uuid.uuid4()
+    self.id = id if id else unicode(str(uuid.uuid4()), "utf-8")
     self.name = name
     self.host = host
-    self.port = int(port)
     self.username = username
     self.password = password
     self.path = path
+
+    try:
+      self.port = int(port)
+    except ValueError:
+      self.port = 22
 
   def encode(self, include_password=False):
     return {
@@ -27,7 +31,11 @@ class Bookmark:
     if "id" in dict: bookmark.id = dict["id"]
     if "name" in dict: bookmark.name = dict["name"]
     if "host" in dict: bookmark.host = dict["host"]
-    if "port" in dict: bookmark.port = int(dict["port"])
+    if "port" in dict:
+      try:
+        bookmark.port = int(dict["port"])
+      except ValueError:
+        None
     if "username" in dict: bookmark.username = dict["username"]
     if "password" in dict: bookmark.password = dict["password"]
     if "path" in dict: bookmark.path = dict["path"]

@@ -16,6 +16,7 @@
 /* Bookmark Item */
 
 .bookmark {
+  position: relative;
   padding: 20px 15px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.2);
   cursor: pointer;
@@ -29,6 +30,20 @@
   font-size: 14px;
 }
 
+.bookmark-remove {
+  position: absolute;
+  top: 50%;
+  right: 15px;
+  float: right;
+  font-size: 16px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.2);
+  border: 0;
+  border-radius: 5px;
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+
 /* Add Bookmark Button */
 
 .bookmark-add {
@@ -37,6 +52,61 @@
 }
 
 .bookmark-add button {
+  padding: 10px 15px;
+  color: #fff;
+  font-size: 13px;
+  background: rgba(0, 0, 0, 0.2);
+  border: 0;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+/* Bookmark Form */
+
+.view-bookmarks-form {
+  min-height: 100%;
+  background-color: #374046;
+}
+
+.bookmark-form {
+  max-width: 700px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.bookmark-form .form-field {
+  display: block;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.bookmark-form .form-field-title {
+  padding-left: 1px;
+  font-size: 14px;
+}
+
+.bookmark-form input {
+  width: 100%;
+  margin: 10px 0;
+  padding: 10px 15px;
+  color: #fff;
+  font-size: 16px;
+  background: rgba(0,0,0,.2);
+  border: 0;
+  border-radius: 3px;
+}
+
+.bookmark-form-field-host {
+  float: left;
+  width: 70%;
+}
+
+.bookmark-form-field-port {
+  float: left;
+  width: 30%;
+  padding-left: 20px;
+}
+
+.bookmark-form button {
   padding: 10px 15px;
   color: #fff;
   font-size: 13px;

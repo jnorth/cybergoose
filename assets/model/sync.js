@@ -20,6 +20,27 @@ const handleError = (error) => {
   alert(error);
 };
 
+const get = (url, body) => {
+  return fetch(url, { method:'get', body })
+    .catch(handleError)
+    .then(checkStatus)
+    .then(parseJSON);
+};
+
+const post = (url, body) => {
+  return fetch(url, { method:'post', body })
+    .catch(handleError)
+    .then(checkStatus)
+    .then(parseJSON);
+};
+
+const del = (url, body) => {
+  return fetch(url, { method:'delete', body })
+    .catch(handleError)
+    .then(checkStatus)
+    .then(parseJSON);
+};
+
 // Bookmarks
 
 const fetchBookmarks = () => {
@@ -28,6 +49,13 @@ const fetchBookmarks = () => {
     .then(checkStatus)
     .then(parseJSON)
     .then(data => data.bookmarks);
+};
+
+const addBookmark = (body) => {
+  return fetch('/bookmarks', { method:'post', body })
+    .catch(handleError)
+    .then(checkStatus)
+    .then(parseJSON);
 };
 
 // Connections
@@ -69,7 +97,9 @@ const download = (path) => {
 };
 
 export default {
+  get, post, del,
   bookmarks: fetchBookmarks,
+  addBookmark,
   connect,
   listing,
   download,

@@ -32,14 +32,14 @@ def web_bookmarks():
 @web.route("/bookmarks", method="POST")
 def web_add_bookmark():
   bookmark = Bookmark.decode(request.forms.decode())
-  app.add_bookmark(bookmark)
-  return { "success":True }
+  status = app.add_bookmark(bookmark)
+  return { "success":status }
 
 @web.route("/bookmarks", method="DELETE")
 def web_remove_bookmark():
   id = request.forms.get("id")
-  app.remove_bookmark(id)
-  return { "success":True }
+  status = app.remove_bookmark(id)
+  return { "success":status }
 
 @web.route("/connect", method="POST")
 def web_connect():

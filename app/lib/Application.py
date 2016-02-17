@@ -42,10 +42,12 @@ class Application:
 
     self.bookmarks.append(bookmark)
     self.db.save_bookmarks(self.bookmarks)
+    return True
 
   def remove_bookmark(self, id):
     self.bookmarks = [b for b in self.bookmarks if b.id != id]
     self.db.save_bookmarks(self.bookmarks)
+    return True
 
   def enqueueTransfer(self, transfer):
     self.queue.put(transfer)

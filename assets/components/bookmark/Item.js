@@ -1,16 +1,16 @@
 import React from 'react';
 import { dom } from 'domb';
 
-const div = dom(React, 'div');
+const { div, button } = dom(React, 'div', 'button');
 
-export default ({ bookmark, onClick }) => {
+export default ({ bookmark, onActivate, onDelete }) => {
   const host = bookmark.port === 22
     ? bookmark.host
     : `${bookmark.host}:${bookmark.port}`;
 
   return div({
     className: 'bookmark',
-    onClick,
+    onClick: onActivate,
     content: [
       div({
         className: 'bookmark-name',
@@ -20,6 +20,12 @@ export default ({ bookmark, onClick }) => {
       div({
         className: 'bookmark-host',
         children: host,
+      }),
+
+      button({
+        className: 'bookmark-remove',
+        content: '\u2715',
+        onClick: onDelete,
       }),
     ],
   });
