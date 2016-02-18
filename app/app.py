@@ -64,6 +64,7 @@ def web_listing():
     return web_error("No active connections.")
 
   listing = connection.list_dir(path)
+  connection.close()
   response = [resource.to_json() for resource in listing]
 
   return { "success":True, "listing":response }

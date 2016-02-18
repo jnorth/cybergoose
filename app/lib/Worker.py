@@ -42,5 +42,6 @@ class Worker(threading.Thread):
 
     client = Client(transfer.get_bookmark())
     client.download(remote_path, local_path, callback=progress)
+    client.close()
 
     print "transferred", transfer
