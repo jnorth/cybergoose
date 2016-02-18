@@ -7,7 +7,7 @@ class Bookmark:
     self.host = host
     self.username = username
     self.password = password
-    self.path = path
+    self.path = path or "."
 
     try:
       self.port = int(port)
@@ -38,5 +38,5 @@ class Bookmark:
         None
     if "username" in dict: bookmark.username = dict["username"]
     if "password" in dict: bookmark.password = dict["password"]
-    if "path" in dict: bookmark.path = dict["path"]
+    if "path" in dict: bookmark.path = dict["path"] or "."
     return bookmark
