@@ -7,9 +7,10 @@
   "dependencies": {},
   "scripts": {
     "build:templates": "cp -r assets/templates app/assets",
+    "build:images": "cp -r assets/images app/assets",
     "build:scripts": "jspm bundle-sfx assets/app.js app/assets/app.js",
     "build:styles": "postcss --use postcss-import --use postcss-extend --use postcss-custom-properties --use autoprefixer -o app/assets/app.css assets/app.css",
-    "build": "npm run build:templates & npm run build:scripts & npm run build:styles & wait",
+    "build": "npm run build:templates & npm run build:images & npm run build:scripts & npm run build:styles & wait",
     "watch:scripts": "chokidar 'assets/**/*.js' -c 'npm run build:scripts; tput bel'",
     "watch:styles": "chokidar 'assets/**/*.css' -c 'npm run build:styles; tput bel'",
     "watch": "npm run watch:scripts & npm run watch:styles"

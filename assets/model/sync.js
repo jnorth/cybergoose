@@ -70,19 +70,6 @@ const connect = (bookmark) => {
     .then(parseJSON);
 };
 
-const listing = (path) => {
-  const body = new FormData();
-  body.append('path', path);
-
-  return fetch('/listing', {
-    method: 'post',
-    body,
-  })
-  .catch(handleError)
-  .then(checkStatus)
-  .then(parseJSON);
-};
-
 const download = (path) => {
   const body = new FormData();
   body.append('path', path);
@@ -101,6 +88,5 @@ export default {
   bookmarks: fetchBookmarks,
   addBookmark,
   connect,
-  listing,
   download,
 };

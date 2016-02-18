@@ -24,9 +24,13 @@ export default class Application extends Store {
     return { ...this.state, connection };
   }
 
+  getActiveConnection() {
+    return this.connections.getConnectionByIndex(this.state.connection);
+  }
+
   connect(bookmark) {
     // Add new connection
-    this.connections.add(bookmark.name, bookmark.id);
+    this.connections.add(bookmark.name, bookmark.id, bookmark.path);
     const connectionId = this.connections.state.length - 1;
 
     // Switch to new connection
@@ -35,9 +39,12 @@ export default class Application extends Store {
 
     // Sync
     sync.connect(bookmark).then((response) => {
-      sync.listing('.').then((response) => {
-        this.connections.setListing(connectionId, response.listing);
-      });
+      this.connections.fetchListing(connectionId, bookmark.path);
     });
+  }
+
+  disconnect() {
+    this.setView('bookmarks');
+    this.connections.remove(this.state.connection);
   }
 }

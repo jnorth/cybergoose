@@ -4,28 +4,19 @@ import { dom, elif } from 'domb';
 import Tabbar from '../Tabbar/element';
 import BookmarkList from '../Bookmark/List';
 import BookmarkForm from '../Bookmark/Form';
-import Listing from '../Listing/element';
-
-const activeConnection = (app) => {
-  if (app.state.view !== 'connection') {
-    return;
-  }
-
-  return app.connections.state[app.state.connection];
-};
+import Connection from '../Connection/Connection';
 
 export default ({ app }) => {
   // State
   const { view } = app.state;
   const bookmarks = app.bookmarks;
-  const connection = activeConnection(app);
 
   // Elements
   const div = dom(React, 'div');
   const tabbar = dom(React, Tabbar);
   const bookmarkList = elif(view === 'bookmarks', dom(React, BookmarkList));
   const bookmarkForm = elif(view === 'bookmarks-form', dom(React, BookmarkForm));
-  const connectionView = elif(view === 'connection', dom(React, Listing));
+  const connectionView = elif(view === 'connection', dom(React, Connection));
 
   return div({
     className: `view-${view}`,
@@ -33,7 +24,7 @@ export default ({ app }) => {
       tabbar({ app }),
       bookmarkList({ app }),
       bookmarkForm({ app }),
-      connectionView({ connection }),
+      connectionView({ app }),
     ],
   });
 }
