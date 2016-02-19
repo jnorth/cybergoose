@@ -17,8 +17,8 @@
 
 .listing-toolbar-path-up {
   display: inline-block;
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   overflow: hidden;
   padding: 0;
   margin-right: 10px;
@@ -65,7 +65,7 @@
 
 .listing-item-label {
   display: table-cell;
-  padding: 15px 20px 15px 80px;
+  padding: 15px 20px 15px 70px;
   vertical-align: middle;
 }
 
@@ -73,14 +73,11 @@
   cursor: pointer;
 }
 
-.listing-item.is-directory .listing-item-label:hover .listing-item-name {
-  text-decoration: underline;
-}
-
 .listing-item-size {
-  padding-top: 4px;
+  padding-top: 1px;
   font-size: 12px;
   letter-spacing: 0px;
+  opacity: 0.75;
 }
 
 .listing-item-actions {
