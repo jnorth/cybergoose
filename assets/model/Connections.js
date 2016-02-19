@@ -35,6 +35,12 @@ export default class Connections extends Store {
 
     sync.post('/listing', body)
       .then((response) => {
+        response.listing.sort((a, b) => {
+          if (a.is_directory && !b.is_directory) return -1;
+          if (!a.is_directory && b.is_directory) return 1;
+          return a.name.localeCompare(b.name);
+        });
+
         this.setListing(connectionIndex, response.listing, path);
       });
   }
