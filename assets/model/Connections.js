@@ -41,7 +41,7 @@ export default class Connections extends Store {
           return a.name.localeCompare(b.name);
         });
 
-        this.setListing(connectionIndex, response.listing, path);
+        this.setListing(connectionIndex, response.listing, response.path);
       });
   }
 

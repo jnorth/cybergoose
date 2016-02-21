@@ -65,9 +65,9 @@ def web_listing():
 
   listing = connection.list_dir(path)
   connection.close()
-  response = [resource.to_json() for resource in listing]
+  response = [resource.to_json() for resource in listing[1]]
 
-  return { "success":True, "listing":response }
+  return { "success":True, "path":listing[0], "listing":response }
 
 @web.route("/downloads", method="GET")
 def web_queue():

@@ -35,7 +35,7 @@ class Client:
     self.open()
     base_path = os.path.normpath(os.path.join(self.sftp.getcwd(), path))
     listing = self.sftp.listdir_attr(base_path)
-    return [Resource.from_attributes(base_path, attributes) for attributes in listing]
+    return [base_path, [Resource.from_attributes(base_path, attributes) for attributes in listing]]
 
   def download(self, remote_path, local_path, callback=None):
     print "client:download {} {}".format(self.bookmark.host, remote_path)
