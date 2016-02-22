@@ -27,7 +27,15 @@
   background: #fff;
 }
 
+/* Bookmarks */
+
 .tab-bookmarks.is-active {
   color: #fff;
   background: #374046;
+}
+
+/* Queue */
+
+.tab-queue {
+
 }

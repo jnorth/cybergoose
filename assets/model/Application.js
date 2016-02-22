@@ -1,6 +1,7 @@
 import { Store, action, child } from 'flax';
 import Bookmarks from './Bookmarks';
 import Connections from './Connections';
+import Queue from './Queue';
 import sync from './sync';
 
 export default class Application extends Store {
@@ -15,6 +16,18 @@ export default class Application extends Store {
 
   @child(new Bookmarks()) bookmarks;
   @child(new Connections()) connections;
+  @child(new Queue()) queue;
+
+  constructor() {
+    super();
+
+    // Update transfer queue when the Queue view is selected
+    this.subscribe(event => {
+      if (event.store === this && event.action.type === 'setView') {
+        this.queue.poll(event.action.payload[0] === 'queue');
+      }
+    });
+  }
 
   @action setView(view) {
     return { ...this.state, view };
@@ -46,5 +59,14 @@ export default class Application extends Store {
   disconnect() {
     this.setView('bookmarks');
     this.connections.remove(this.state.connection);
+  }
+
+  enqueueTransfer(connection, path) {
+    const body = new FormData();
+    body.append('bookmark_id', connection.bookmarkId);
+    body.append('path', path);
+
+    sync.post('/downloads', body)
+      .then(response => this.queue.fetch());
   }
 }

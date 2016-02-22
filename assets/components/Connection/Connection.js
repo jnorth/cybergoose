@@ -24,6 +24,7 @@ export default function Connection({ app }) {
       empty(),
       listing({
         onDirectory: path => app.connections.fetchListing(app.state.connection, path),
+        onDownload: path => app.enqueueTransfer(connection, path),
         listing: connection.listing,
       }),
     ],

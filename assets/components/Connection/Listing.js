@@ -4,7 +4,7 @@ import { dom } from 'domb';
 const div = dom(React, 'div');
 const button = dom(React, 'button');
 
-export default ({ listing, onDirectory }) => {
+export default ({ listing, onDirectory, onDownload }) => {
   return div({
     className: 'connection-listing',
     children: [
@@ -34,7 +34,10 @@ export default ({ listing, onDirectory }) => {
             div({
               className: 'listing-item-actions',
               content: [
-                button('Download'),
+                button({
+                  content: 'Download',
+                  onClick: event => onDownload(resource.path),
+                }),
               ],
             }),
 

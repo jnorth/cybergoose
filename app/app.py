@@ -71,7 +71,8 @@ def web_listing():
 
 @web.route("/downloads", method="GET")
 def web_queue():
-  return { "success":True, "queue":app.queued() }
+  queue = [item.to_json() for item in app.queued()]
+  return { "success":True, "queue":queue }
 
 @web.route("/downloads", method="POST")
 def web_download():
@@ -79,15 +80,19 @@ def web_download():
   if path is None:
     return web_error("No path provided.")
 
-  connection = app.get_connection()
-  if connection is None:
-    return web_error("No active connection.")
+  bookmark_id = request.forms.get("bookmark_id")
+  if bookmark_id is None:
+    return web_error("No bookmark id provided.")
 
-  transfer = Transfer(bookmark=connection.get_bookmark(), path=path)
+  bookmark = app.get_bookmark_by_id(bookmark_id)
+  if bookmark is None:
+    return web_error("No bookmark found.")
+
+  transfer = Transfer(bookmark=bookmark, path=path)
   app.enqueueTransfer(transfer)
   return { "success":True }
 
 
 # Run application
 web.run(host="0.0.0.0", port=8080, debug=True)
-app.stop_workers()
+app.stop()

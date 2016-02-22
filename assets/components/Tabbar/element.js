@@ -18,9 +18,7 @@ export default function render({ app }) {
         label: '+',
         classes: 'tab-bookmarks',
         active: app.state.view === 'bookmarks',
-        handler: (event) => {
-          app.setView('bookmarks');
-        },
+        handler: event => app.setView('bookmarks'),
       }),
 
       // Connection tabs
@@ -28,11 +26,20 @@ export default function render({ app }) {
         key: `${connection.bookmarkId}:${index}`,
         label: connection.name,
         active: app.state.view === 'connection' && connectionIndex === index,
-        handler: (event) => {
+        handler: event => {
           app.setView('connection');
           app.setConnection(index);
         },
       })),
+
+      // Queue tab
+      tab({
+        key: 'queue',
+        label: 'Q',
+        classes: 'tab-queue',
+        active: app.state.view === 'queue',
+        handler: event => app.setView('queue'),
+      }),
 
     ],
   });

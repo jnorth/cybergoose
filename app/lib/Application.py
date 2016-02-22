@@ -1,14 +1,9 @@
-from Queue import Queue
 from Client import Client
-from Worker import Worker
+from TransferManager import TransferManager
 
 class Application:
   def __init__(self, db):
-    self.queue = Queue()
-
-    worker = Worker(self.queue)
-    worker.start()
-    self.workers = [worker]
+    self.queue = TransferManager()
 
     self.client = None
 
@@ -17,6 +12,12 @@ class Application:
 
   def get_bookmarks(self):
     return self.bookmarks
+
+  def get_bookmark_by_id(self, id):
+    for bookmark in self.bookmarks:
+      if bookmark.id == id:
+        return bookmark
+    return None
 
   def get_connection(self):
     return self.client
@@ -50,11 +51,10 @@ class Application:
     return True
 
   def enqueueTransfer(self, transfer):
-    self.queue.put(transfer)
+    self.queue.enqueue(transfer)
 
   def queued(self):
-    return [item for item in self.queue.queue]
+    return self.queue.all()
 
-  def stop_workers(self):
-    for worker in self.workers:
-      worker.stop()
+  def stop(self):
+    self.queue.stop_workers()

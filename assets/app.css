@@ -30,9 +30,4 @@ body {
 @import "components/Bookmark/style.css";
 @import "components/Tabbar/style.css";
 @import "components/Connection/style.css";
-
-/* Queue */
-
-.queue {
-
-}
+@import "components/Queue/style.css";

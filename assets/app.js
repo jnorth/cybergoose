@@ -16,3 +16,4 @@ app.subscribe((event) => {
 });
 
 app.bookmarks.fetch();
+app.queue.fetch();

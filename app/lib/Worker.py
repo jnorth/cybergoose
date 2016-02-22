@@ -1,11 +1,10 @@
+from __future__ import division
+
 import os
 import time
 import uuid
 import threading
 from Client import Client
-
-def progress(bytes, total_bytes):
-  print "transfering {} ({} of {})".format(bytes / total_bytes, bytes, total_bytes)
 
 class Worker(threading.Thread):
   def __init__(self, queue):
@@ -13,18 +12,23 @@ class Worker(threading.Thread):
 
     self.id = uuid.uuid4()
     self.queue = queue
+    self.current_transfer = None
 
     self.sleep_period = 1.0
     self.stop_event = threading.Event()
+
+  def get_current_transfer(self):
+    return self.current_transfer
 
   def run(self):
     print "starting worker {0}".format(self.id)
 
     while not self.stop_event.isSet():
-      if not self.queue.empty():
-        transfer = self.queue.get()
+      transfer = self.queue.next()
+
+      if transfer:
+        self.queue.activate(transfer)
         self.process(transfer)
-        self.queue.task_done()
 
       self.stop_event.wait(self.sleep_period)
 
@@ -35,13 +39,22 @@ class Worker(threading.Thread):
 
   def process(self, transfer):
     print "transfering", transfer
+    self.current_transfer = transfer
 
     remote_path = transfer.get_path()
     filename = os.path.basename(remote_path)
     local_path = os.path.join("/data", filename)
 
     client = Client(transfer.get_bookmark())
-    client.download(remote_path, local_path, callback=progress)
+    client.download(remote_path, local_path, callback=self.progress)
     client.close()
 
-    print "transferred", transfer
+    transfer.complete()
+    self.queue.complete(transfer)
+
+    self.current_transfer = None
+    print "transferred {}".format(transfer.to_json())
+
+  def progress(self, bytes, total_bytes):
+    print "transfering {0:.0f} ({1} bytes) {2}".format((bytes / total_bytes) * 100, total_bytes, self.current_transfer.path)
+    self.current_transfer.progress = (bytes / total_bytes)

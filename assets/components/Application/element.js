@@ -5,6 +5,7 @@ import Tabbar from '../Tabbar/element';
 import BookmarkList from '../Bookmark/List';
 import BookmarkForm from '../Bookmark/Form';
 import Connection from '../Connection/Connection';
+import Queue from '../Queue/Queue';
 
 export default ({ app }) => {
   // State
@@ -17,6 +18,7 @@ export default ({ app }) => {
   const bookmarkList = elif(view === 'bookmarks', dom(React, BookmarkList));
   const bookmarkForm = elif(view === 'bookmarks-form', dom(React, BookmarkForm));
   const connectionView = elif(view === 'connection', dom(React, Connection));
+  const queueView = elif(view === 'queue', dom(React, Queue));
 
   return div({
     className: `view-${view}`,
@@ -25,6 +27,7 @@ export default ({ app }) => {
       bookmarkList({ app }),
       bookmarkForm({ app }),
       connectionView({ app }),
+      queueView({ queue:app.queue }),
     ],
   });
 }
