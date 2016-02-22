@@ -1,7 +1,7 @@
 
-docker build --rm  -t sublink/sftp-sync .
+docker build --rm  -t sublink/cybergoose .
 
-APP=$(docker run -d -p 8080:8080 -v `pwd`:/data sublink/sftp-sync)
+APP=$(docker run -d -p 8080:8080 -v `pwd`:/data sublink/cybergoose)
 
 PORT=$(docker port $APP 8080 | awk -F: '{ print $2 }')
 

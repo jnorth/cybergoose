@@ -1,1 +1,1 @@
-docker run --rm -i -v `pwd`:/data sublink/sftp-sync /bin/sh
+docker run --rm -it -v `pwd`:/data sublink/cybergoose /bin/sh
