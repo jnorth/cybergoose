@@ -13,9 +13,9 @@
     "watch:scripts": "chokidar 'assets/**/*.js' -c 'npm run build:scripts; tput bel'",
     "watch:styles": "chokidar 'assets/**/*.css' -c 'npm run build:styles; tput bel'",
     "watch": "npm run watch:scripts & npm run watch:styles",
-    "docker:build": "docker build --rm  -t jnorth/cybergoose .",
-    "docker:run": "docker run --rm -i -p 8080:8080 -v `pwd`:/data jnorth/cybergoose",
-    "docker:ssh": "docker run --rm -it -p 8080:8080 -v `pwd`:/data jnorth/cybergoose /bin/sh"
+    "docker:build": "docker build --rm  -t sublink/cybergoose .",
+    "docker:run": "docker run --rm -i -p 8080:8080 -v `pwd`:/data sublink/cybergoose",
+    "docker:ssh": "docker run --rm -it -p 8080:8080 -v `pwd`:/data sublink/cybergoose /bin/sh"
   },
   "devDependencies": {
     "autoprefixer": "^6.1.2",
