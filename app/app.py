@@ -3,15 +3,17 @@ from bottle import Bottle, request, static_file
 from lib.Database import Database
 from lib.Bookmark import Bookmark
 from lib.Application import Application
-from lib.Client import Client
 from lib.Transfer import Transfer
 
 
 # Create application
 app = Application(Database("/data/db.json"))
 
+
+# Response helpers
 def web_error(message):
   return { "success":False, "error":message }
+
 
 # Routes
 web = Bottle()
@@ -20,7 +22,11 @@ web = Bottle()
 def web_index():
   return static_file("index.html", root="./assets/templates")
 
-@web.route("/assets/:filename#.*#")
+@web.route('/assets/<filename:re:.*\.svg>')
+def web_asset_svg(filename):
+  return static_file(filename, root='./assets', mimetype='image/svg+xml')
+
+@web.route("/assets/<filename:path>")
 def web_asset(filename):
   return static_file(filename, root="./assets")
 

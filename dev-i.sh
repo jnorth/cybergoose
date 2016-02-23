@@ -1,1 +1,1 @@
-docker run --rm -it -v `pwd`:/data sublink/cybergoose /bin/sh
+docker run --rm -it -p 8080:8080 -v `pwd`:/data sublink/cybergoose /bin/sh
