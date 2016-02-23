@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "A simple SFTP client.",
   "author": "Joseph North <north@sublink.ca>",
+  "repository": "bitbucket:jnorth/cybergoose",
   "license": "MIT",
   "dependencies": {},
   "scripts": {
