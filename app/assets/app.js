@@ -15563,7 +15563,7 @@ $__System.register('10b', ['f', '3b', '3d', '3c'], function (_export) {
           }),
           content: [div({
             className: 'queue-item-label',
-            content: basename(item.path)
+            content: basename(item.path) + ' ' + item.rate + '/s'
           }), div({
             className: 'queue-item-progress',
             style: { width: item.progress * 100 + '%' }

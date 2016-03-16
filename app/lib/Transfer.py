@@ -11,6 +11,7 @@ class Transfer:
     self.failed = False
     self.transferred = 0
     self.size = 0
+    self.rate = 0
 
   def get_bookmark(self):
     return self.bookmark
@@ -37,4 +38,5 @@ class Transfer:
       "failed": self.failed,
       "size": self.size,
       "transferred": self.transferred,
+      "rate": self.rate,
     }

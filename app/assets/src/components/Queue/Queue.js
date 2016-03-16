@@ -23,7 +23,7 @@ export default function Queue({ queue }) {
 
           div({
             className: 'queue-item-label',
-            content: basename(item.path),
+            content: basename(item.path) + ' ' + item.rate + '/s',
           }),
 
           div({

@@ -22,6 +22,7 @@ class Client:
     print "client:open {}".format(self.bookmark.host)
     self.transport = paramiko.Transport((self.bookmark.host, self.bookmark.port))
     self.transport.connect(username=self.bookmark.username, password=self.bookmark.password)
+    self.transport.window_size = 5 * 1024 * 1024
     self.sftp = paramiko.SFTPClient.from_transport(self.transport)
     self.sftp.chdir(self.bookmark.path)
 

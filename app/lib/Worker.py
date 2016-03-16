@@ -12,7 +12,6 @@ class Worker(threading.Thread):
 
     self.id = uuid.uuid4()
     self.queue = queue
-    self.current_transfer = None
 
     self.sleep_period = 1.0
     self.stop_event = threading.Event()
@@ -37,24 +36,50 @@ class Worker(threading.Thread):
     self.stop_event.set()
     threading.Thread.join(self, timeout)
 
-  def process(self, transfer):
-    print "transfering", transfer
+  def init_transfer(self, transfer=None):
     self.current_transfer = transfer
+    self.rate = 0
+    self.start_time = 0 if transfer is None else time.time()
+
+  def process(self, transfer):
+    print "transfering {}".format(transfer.to_json())
 
     remote_path = transfer.get_path()
     filename = os.path.basename(remote_path)
     local_path = os.path.join("/data", filename)
 
+    self.init_transfer(transfer)
     client = Client(transfer.get_bookmark())
     client.download(remote_path, local_path, callback=self.progress)
     client.close()
+    self.init_transfer()
 
     transfer.complete()
     self.queue.complete(transfer)
 
-    self.current_transfer = None
     print "transferred {}".format(transfer.to_json())
 
   def progress(self, bytes, total_bytes):
-    print "transfering {0:.0f} ({1} bytes) {2}".format((bytes / total_bytes) * 100, total_bytes, self.current_transfer.path)
-    self.current_transfer.progress = (bytes / total_bytes)
+    percent = bytes / total_bytes
+
+    bps = bytes / (time.time() - self.start_time)
+    self.rate += (bps - self.rate) / 5;
+
+    self.current_transfer.progress = percent
+    self.current_transfer.transferred = bytes
+    self.current_transfer.size = total_bytes
+    self.current_transfer.rate = self.size(self.rate)
+
+    print "transfer {0} {1:.0f}% of {2} {3}/s".format(
+      os.path.basename(self.current_transfer.path),
+      percent * 100,
+      self.size(total_bytes),
+      self.size(self.rate),
+    )
+
+  def size(self, num, suffix="B"):
+    for unit in ['','K','M','G','T','P','E','Z']:
+      if abs(num) < 1024.0:
+        return "%3.1f %s%s" % (num, unit, suffix)
+      num /= 1024.0
+    return "%.1f %s%s" % (num, 'Y', suffix)
