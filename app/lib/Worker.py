@@ -70,6 +70,9 @@ class Worker(threading.Thread):
     self.current_transfer.size = total_bytes
     self.current_transfer.rate = self.size(self.rate)
 
+    if self.current_transfer.canceled:
+      return True
+
     print "transfer {0} {1:.0f}% of {2} {3}/s".format(
       os.path.basename(self.current_transfer.path),
       percent * 100,

@@ -2321,6 +2321,18 @@ $__System.register('39', ['5', '7', '8', '9', '10', '11', '37', 'b', 'c', 'd', '
               return _this3.queue.fetch();
             });
           }
+        }, {
+          key: 'cancelTransfer',
+          value: function cancelTransfer(transfer) {
+            var _this4 = this;
+
+            var body = new FormData();
+            body.append('transfer_id', transfer.id);
+
+            sync.del('/downloads', body).then(function (response) {
+              return _this4.queue.fetch();
+            });
+          }
         }], null, _instanceInitializers);
 
         return Application;
@@ -15547,10 +15559,11 @@ $__System.registerDynamic("3c", ["10a"], true, function($__require, exports, mod
 });
 
 $__System.register('10b', ['f', '3b', '3d', '3c'], function (_export) {
-  var _toConsumableArray, React, dom, classnames, div, basename;
+  var _toConsumableArray, React, dom, classnames, div, button, basename;
 
   function Queue(_ref) {
-    var queue = _ref.queue;
+    var app = _ref.app;
+    var queue = app.queue;
 
     return div({
       className: 'queue',
@@ -15564,6 +15577,11 @@ $__System.register('10b', ['f', '3b', '3d', '3c'], function (_export) {
           content: [div({
             className: 'queue-item-label',
             content: basename(item.path) + ' ' + item.rate + '/s'
+          }), button({
+            content: 'Cancel',
+            onClick: function onClick(event) {
+              return app.cancelTransfer(item);
+            }
           }), div({
             className: 'queue-item-progress',
             style: { width: item.progress * 100 + '%' }
@@ -15589,6 +15607,7 @@ $__System.register('10b', ['f', '3b', '3d', '3c'], function (_export) {
       _export('default', Queue);
 
       div = dom(React, 'div');
+      button = dom(React, 'button');
 
       basename = function basename(str) {
         return str.substr(str.lastIndexOf('/') + 1);
@@ -15636,7 +15655,7 @@ $__System.register('10c', ['41', '42', '46', '3b', '3d', '3e', '10b'], function 
 
         return div({
           className: 'view-' + view,
-          content: [tabbar({ app: app }), bookmarkList({ app: app }), bookmarkForm({ app: app }), connectionView({ app: app }), queueView({ queue: app.queue })]
+          content: [tabbar({ app: app }), bookmarkList({ app: app }), bookmarkForm({ app: app }), connectionView({ app: app }), queueView({ app: app })]
         });
       });
     }

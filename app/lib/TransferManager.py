@@ -35,6 +35,17 @@ class TransferManager:
     if transfer in self.active: self.active.remove(transfer)
     self.completed.insert(0, transfer)
 
+  def cancel(self, transfer_id):
+    canceled_item = None
+
+    for item in self.all():
+      if item.id == transfer_id:
+        item.canceled = True
+        canceled_item = item
+
+    if canceled_item:
+      self.complete(canceled_item)
+
   def stop_workers(self):
     for worker in self.workers:
       worker.stop()

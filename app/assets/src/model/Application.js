@@ -69,4 +69,12 @@ export default class Application extends Store {
     sync.post('/downloads', body)
       .then(response => this.queue.fetch());
   }
+
+  cancelTransfer(transfer) {
+    const body = new FormData();
+    body.append('transfer_id', transfer.id);
+
+    sync.del('/downloads', body)
+      .then(response => this.queue.fetch());
+  }
 }

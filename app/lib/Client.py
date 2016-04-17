@@ -1,5 +1,6 @@
 import os
 import paramiko
+from math import ceil
 
 from Resource import Resource
 
@@ -38,7 +39,35 @@ class Client:
     listing = self.sftp.listdir_attr(base_path)
     return [base_path, [Resource.from_attributes(base_path, attributes) for attributes in listing]]
 
-  def download(self, remote_path, local_path, callback=None):
+  def download(self, remote_path, local_path, callback=None, buffer=32768, prefetch=50):
     print "client:download {} {}".format(self.bookmark.host, remote_path)
     self.open()
-    self.sftp.get(remote_path, local_path, callback=callback)
+
+    # Open local file
+    with open(local_path, "wb") as local_file:
+
+      # Open remote file
+      with self.sftp.open(remote_path, "rb") as remote_file:
+        total_bytes = remote_file.stat().st_size
+        transferred_bytes = 0
+        active = True
+
+        while active:
+          chunks = self.next_chunks(total_bytes, transferred_bytes, buffer, prefetch)
+          if len(chunks) < 1: break
+
+          for data in remote_file.readv(chunks):
+            local_file.write(data)
+            transferred_bytes += len(data)
+
+            if callback is not None:
+              should_stop = callback(transferred_bytes, total_bytes)
+              if should_stop: active = False
+
+            if len(data) == 0:
+              break
+
+  def next_chunks(self, total_bytes, offset, chunk_size, chunk_count):
+    chunks_remaining = int(ceil(float(total_bytes - offset) / chunk_size))
+    num = min(chunk_count, chunks_remaining)
+    return [(offset + (chunk_size * i), chunk_size) for i in xrange(num)]

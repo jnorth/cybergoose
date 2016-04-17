@@ -27,7 +27,7 @@ export default ({ app }) => {
       bookmarkList({ app }),
       bookmarkForm({ app }),
       connectionView({ app }),
-      queueView({ queue:app.queue }),
+      queueView({ app }),
     ],
   });
 }

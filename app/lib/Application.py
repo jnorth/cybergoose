@@ -53,6 +53,9 @@ class Application:
   def enqueueTransfer(self, transfer):
     self.queue.enqueue(transfer)
 
+  def cancelTransfer(self, transfer_id):
+    self.queue.cancel(transfer_id)
+
   def queued(self):
     return self.queue.all()
 

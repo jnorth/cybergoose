@@ -9,6 +9,7 @@ class Transfer:
     self.progress = 0.0
     self.completed = False
     self.failed = False
+    self.canceled = False
     self.transferred = 0
     self.size = 0
     self.rate = 0
@@ -36,6 +37,7 @@ class Transfer:
       "progress": self.progress,
       "completed": self.completed,
       "failed": self.failed,
+      "canceled": self.canceled,
       "size": self.size,
       "transferred": self.transferred,
       "rate": self.rate,

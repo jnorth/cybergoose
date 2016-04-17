@@ -3,12 +3,15 @@ import { dom } from 'domb';
 import classnames from 'classnames';
 
 const div = dom(React, 'div');
+const button = dom(React, 'button');
 
 const basename = (str) => {
   return str.substr(str.lastIndexOf('/') + 1);
 };
 
-export default function Queue({ queue }) {
+export default function Queue({ app }) {
+  const { queue } = app;
+
   return div({
     className: 'queue',
     children: [
@@ -24,6 +27,11 @@ export default function Queue({ queue }) {
           div({
             className: 'queue-item-label',
             content: basename(item.path) + ' ' + item.rate + '/s',
+          }),
+
+          button({
+            content: 'Cancel',
+            onClick: event => app.cancelTransfer(item),
           }),
 
           div({

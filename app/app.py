@@ -98,6 +98,15 @@ def web_download():
   app.enqueueTransfer(transfer)
   return { "success":True }
 
+@web.route("/downloads", method="DELETE")
+def web_download_cancel():
+  transfer_id = request.forms.get("transfer_id")
+  if transfer_id is None:
+      return web_error("No transfer provided.")
+
+  app.cancelTransfer(transfer_id)
+  return { "success":True }
+
 
 # Run application
 web.run(host="0.0.0.0", port=8080, debug=True)
