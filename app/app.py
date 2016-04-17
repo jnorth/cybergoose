@@ -65,9 +65,13 @@ def web_listing():
   if path is None:
     return web_error("No path provided.")
 
-  connection = app.get_connection()
+  bookmark_id = request.forms.get("bookmark_id")
+  if bookmark_id is None:
+    return web_error("No bookmark id provided.")
+
+  connection = app.connect(bookmark_id)
   if connection is None:
-    return web_error("No active connections.")
+    return web_error("Invalid bookmark.")
 
   listing = connection.list_dir(path)
   connection.close()

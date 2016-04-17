@@ -823,8 +823,11 @@ $__System.register('10', ['8', '9', '11', 'b', 'c', 'd', 'e', 'f'], function (_e
           value: function fetchListing(connectionIndex, path) {
             var _this = this;
 
+            var connection = this.state[connectionIndex];
+
             var body = new FormData();
             body.append('path', path);
+            body.append('bookmark_id', connection.bookmarkId);
 
             sync.post('/listing', body).then(function (response) {
               response.listing.sort(function (a, b) {

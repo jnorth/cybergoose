@@ -30,8 +30,11 @@ export default class Connections extends Store {
   }
 
   fetchListing(connectionIndex, path) {
+    const connection = this.state[connectionIndex];
+
     const body = new FormData();
     body.append('path', path);
+    body.append('bookmark_id', connection.bookmarkId);
 
     sync.post('/listing', body)
       .then((response) => {

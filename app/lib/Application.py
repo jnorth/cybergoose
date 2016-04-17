@@ -19,9 +19,6 @@ class Application:
         return bookmark
     return None
 
-  def get_connection(self):
-    return self.client
-
   def connect(self, bookmark_id):
     if self.client:
       if self.client.get_bookmark().id == bookmark_id:
