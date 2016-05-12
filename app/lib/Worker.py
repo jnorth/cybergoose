@@ -1,6 +1,7 @@
 from __future__ import division
 
 import os
+import errno
 import time
 import uuid
 import threading
@@ -44,13 +45,22 @@ class Worker(threading.Thread):
   def process(self, transfer):
     print "transfering {}".format(transfer.to_json())
 
-    remote_path = transfer.get_path()
-    filename = os.path.basename(remote_path)
-    local_path = os.path.join("/data", filename)
+    remote_path = transfer.get_remote_path()
+    local_path = os.path.join("/data", transfer.get_path())
+    local_dir = os.path.dirname(local_path)
+
+    # TODO replace with `os.makedirs(path, exist_ok=True)` in python 3.2
+    try:
+      os.makedirs(local_dir)
+    except OSError as exc:
+      if exc.errno == errno.EEXIST and os.path.isdir(local_dir):
+        pass
+      else:
+        raise
 
     self.init_transfer(transfer)
     client = Client(transfer.get_bookmark())
-    client.download(remote_path, local_path, callback=self.progress)
+    client.download_file(remote_path, local_path, callback=self.progress)
     client.close()
     self.init_transfer()
 

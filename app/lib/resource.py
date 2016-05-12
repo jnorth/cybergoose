@@ -18,6 +18,9 @@ class Resource:
   def is_directory(self):
     return stat.S_ISDIR(self.mode)
 
+  def is_link(self):
+    return stat.S_ISLNK(self.mode)
+
   def size(self, suffix="B"):
     num = self.bytes
     for unit in ['','K','M','G','T','P','E','Z']:
@@ -33,6 +36,7 @@ class Resource:
       "bytes": self.bytes,
       "size": self.size(),
       "is_directory": self.is_directory(),
+      "is_link": self.is_link(),
     }
 
   def __repr__(self):

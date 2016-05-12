@@ -1,4 +1,5 @@
 import os
+import stat
 import paramiko
 from math import ceil
 
@@ -39,7 +40,30 @@ class Client:
     listing = self.sftp.listdir_attr(base_path)
     return [base_path, [Resource.from_attributes(base_path, attributes) for attributes in listing]]
 
-  def download(self, remote_path, local_path, callback=None, buffer=32768, prefetch=50):
+  def walk_dir(self, base_path="."):
+    print "client:list_dir {} {}".format(self.bookmark.host, base_path)
+    self.open()
+
+    path = os.path.normpath(os.path.join(self.sftp.getcwd(), base_path))
+    files = []
+
+    is_directory = stat.S_ISDIR(self.sftp.stat(path).st_mode)
+
+    if is_directory:
+      listing = self.sftp.listdir_attr(path)
+      listing = [Resource.from_attributes(path, attributes) for attributes in listing]
+
+      for resource in listing:
+        if resource.is_directory():
+          files = files + self.walk_dir(resource.path)
+        else:
+          files.append(resource.path)
+    else:
+      files.append(path)
+
+    return files
+
+  def download_file(self, remote_path, local_path, callback=None, buffer=32768, prefetch=50):
     print "client:download {} {}".format(self.bookmark.host, remote_path)
     self.open()
 

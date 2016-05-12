@@ -3,7 +3,6 @@ from bottle import Bottle, request, static_file
 from lib.Database import Database
 from lib.Bookmark import Bookmark
 from lib.Application import Application
-from lib.Transfer import Transfer
 
 
 # Create application
@@ -98,8 +97,7 @@ def web_download():
   if bookmark is None:
     return web_error("No bookmark found.")
 
-  transfer = Transfer(bookmark=bookmark, path=path)
-  app.enqueueTransfer(transfer)
+  app.enqueueTransfers(bookmark, path)
   return { "success":True }
 
 @web.route("/downloads", method="DELETE")

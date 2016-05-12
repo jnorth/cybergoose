@@ -1,4 +1,5 @@
 from Client import Client
+from Transfer import Transfer
 from TransferManager import TransferManager
 
 class Application:
@@ -47,8 +48,13 @@ class Application:
     self.db.save_bookmarks(self.bookmarks)
     return True
 
-  def enqueueTransfer(self, transfer):
-    self.queue.enqueue(transfer)
+  def enqueueTransfers(self, bookmark, root_path):
+    client = self.connect(bookmark.id)
+    files = client.walk_dir(root_path)
+
+    for file in files:
+      transfer = Transfer(bookmark=bookmark, base_path=root_path, path=file)
+      self.queue.enqueue(transfer)
 
   def cancelTransfer(self, transfer_id):
     self.queue.cancel(transfer_id)

@@ -1,10 +1,12 @@
+import os
 import uuid
 from Client import Client
 
 class Transfer:
-  def __init__(self, bookmark=None, path=None):
+  def __init__(self, bookmark=None, base_path=None, path=None):
     self.id = unicode(str(uuid.uuid4()), "utf-8")
     self.bookmark = bookmark
+    self.base_path = base_path
     self.path = path
     self.progress = 0.0
     self.completed = False
@@ -17,8 +19,12 @@ class Transfer:
   def get_bookmark(self):
     return self.bookmark
 
-  def get_path(self):
+  def get_remote_path(self):
     return self.path
+
+  def get_path(self):
+    base = os.path.dirname(self.base_path)
+    return os.path.relpath(self.path, base)
 
   def get_progress(self):
     return self.progress
@@ -33,12 +39,13 @@ class Transfer:
       "id": str(self.id),
       "bookmark": self.bookmark.name,
       "host": self.bookmark.host,
+      "base": self.base_path,
       "path": self.path,
       "progress": self.progress,
       "completed": self.completed,
       "failed": self.failed,
       "canceled": self.canceled,
-      "size": self.size,
       "transferred": self.transferred,
+      "size": self.size,
       "rate": self.rate,
     }
