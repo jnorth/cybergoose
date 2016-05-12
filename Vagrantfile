@@ -1,5 +1,21 @@
 NAME = "cybergoose"
 
+PROVISION = <<PROVISION
+apt-get update && apt-get install -y \
+  build-essential \
+  avahi-daemon \
+  libffi-dev \
+  libssl-dev \
+  python-dev \
+  python-pip
+
+pip install --upgrade \
+  pip \
+  bottle \
+  dpath \
+  paramiko
+PROVISION
+
 Vagrant.configure("2") do |config|
   config.vm.box = "ubuntu/trusty64"
 
@@ -25,5 +41,5 @@ Vagrant.configure("2") do |config|
   config.vm.synced_folder "./app", "/app", create: true
 
   # Provisioning
-  config.vm.provision :shell, :path => "vagrant-provision.sh"
+  config.vm.provision :shell, :inline => PROVISION
 end
