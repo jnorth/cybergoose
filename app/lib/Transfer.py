@@ -16,6 +16,12 @@ class Transfer:
     self.size = 0
     self.rate = 0
 
+  def is_ready(self):
+    if self.completed: return False
+    if self.failed: return False
+    if self.canceled: return False
+    return True
+
   def get_bookmark(self):
     return self.bookmark
 

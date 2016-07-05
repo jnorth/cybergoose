@@ -27,8 +27,11 @@ class Worker(threading.Thread):
       transfer = self.queue.next()
 
       if transfer:
-        self.queue.activate(transfer)
-        self.process(transfer)
+        if transfer.is_ready():
+          self.queue.activate(transfer)
+          self.process(transfer)
+        else:
+          self.queue.complete(transfer)
 
       self.stop_event.wait(self.sleep_period)
 

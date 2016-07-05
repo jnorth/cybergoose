@@ -34,10 +34,9 @@ class TransferManager:
   def complete(self, transfer):
     if transfer in self.active:
       self.active.remove(transfer)
-      self.completed.insert(0, transfer)
 
-    if transfer in [item for item in self.queue.queue]:
-      self.active.remove(transfer)
+    if transfer not in self.completed:
+      self.completed.insert(0, transfer)
 
   def cancel(self, transfer_id):
     canceled_item = None
