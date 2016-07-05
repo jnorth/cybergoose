@@ -1,47 +1,99 @@
 import React from 'react';
-import { dom } from 'domb';
+import { dom, elif } from 'domb';
 import classnames from 'classnames';
+import filesize from 'filesize';
+
+import ListItemView from '../ListItem/ListItem';
 
 const div = dom(React, 'div');
-const button = dom(React, 'button');
+const listItem = dom(React, ListItemView);
 
-const basename = (str) => {
+function basename(str) {
   return str.substr(str.lastIndexOf('/') + 1);
 };
+
+function queueItemStatus(item) {
+  if (item.failed) return 'Failed';
+  if (item.canceled) return 'Canceled';
+  if (item.completed) return 'Completed';
+  if (queueItemIsActive(item)) return 'Downloading';
+  return 'Queued';
+}
+
+function queueItemIsActive(item) {
+  return item.transferred > 0 && (!item.failed && !item.canceled && !item.completed);
+}
+
+function queueItemActions(app, item) {
+  if (!item.failed && !item.canceled && !item.completed) {
+    return [
+      { name: 'Cancel', handler: event => app.cancelTransfer(item) }
+    ];
+  } else {
+    return [];
+  }
+}
+
+function queueItemSubtitle(item) {
+  const isActive = queueItemIsActive(item);
+  const percentage = ((item.transferred / item.size) * 100).toFixed(2);
+
+  return [
+    // Status
+    div({
+      className: 'queue-item-status',
+      content: queueItemStatus(item),
+    }),
+
+    // Percent
+    elif(percentage > 0 && percentage != 100, div)({
+      className: 'queue-item-percent',
+      content: `${percentage}%`,
+    }),
+
+    // Transferred - active download
+    elif(isActive && !item.completed, div)({
+      className: 'queue-item-filesize',
+      content: `${filesize(item.transferred)} of ${filesize(item.size)}`,
+    }),
+
+    // Transferred - completed
+    elif(item.transferred && !isActive && item.completed && !item.canceled && !item.failed, div)({
+      className: 'queue-item-filesize',
+      content: filesize(item.size),
+    }),
+
+    // Transferred - other
+    elif(item.transferred && !isActive && (item.canceled || item.failed), div)({
+      className: 'queue-item-filesize',
+      content: filesize(item.transferred),
+    }),
+
+    // Rate
+    elif(isActive, div)({
+      className: 'queue-item-rate',
+      content: `${item.rate}/s`,
+    }),
+  ];
+}
 
 export default function Queue({ app }) {
   const { queue } = app;
 
   return div({
     className: 'queue',
-    children: [
-
-      ...queue.state.map(item => div({
-        key: `queue-${item.id}`,
-        className: classnames('queue-item', {
-          'is-complete': item.completed,
-          'is-fail': item.failed,
-        }),
-        content: [
-
-          div({
-            className: 'queue-item-label',
-            content: basename(item.path) + ' ' + item.rate + '/s',
-          }),
-
-          button({
-            content: 'Cancel',
-            onClick: event => app.cancelTransfer(item),
-          }),
-
-          div({
-            className: 'queue-item-progress',
-            style: { width: `${item.progress * 100}%` },
-          }),
-
-        ],
-      })),
-
-    ],
+    children: queue.state.map(item => listItem({
+      key: `queue-${item.id}`,
+      title: basename(item.path),
+      progress: (queueItemIsActive(item) ? item.progress : undefined),
+      actions: queueItemActions(app, item),
+      subtitle: queueItemSubtitle(item),
+      className: classnames('queue-item', {
+        'failed': item.failed,
+        'canceled': item.canceled,
+        'completed': item.completed,
+        'active': queueItemIsActive(item),
+      }),
+    })),
   });
 }

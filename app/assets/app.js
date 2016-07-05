@@ -1,641 +1,33 @@
-"format global";
-(function(global) {
-
-  var defined = {};
-
-  // indexOf polyfill for IE8
-  var indexOf = Array.prototype.indexOf || function(item) {
-    for (var i = 0, l = this.length; i < l; i++)
-      if (this[i] === item)
-        return i;
-    return -1;
-  }
-
-  var getOwnPropertyDescriptor = true;
-  try {
-    Object.getOwnPropertyDescriptor({ a: 0 }, 'a');
-  }
-  catch(e) {
-    getOwnPropertyDescriptor = false;
-  }
-
-  var defineProperty;
-  (function () {
-    try {
-      if (!!Object.defineProperty({}, 'a', {}))
-        defineProperty = Object.defineProperty;
-    }
-    catch (e) {
-      defineProperty = function(obj, prop, opt) {
-        try {
-          obj[prop] = opt.value || opt.get.call(obj);
-        }
-        catch(e) {}
-      }
-    }
-  })();
-
-  function register(name, deps, declare) {
-    if (arguments.length === 4)
-      return registerDynamic.apply(this, arguments);
-    doRegister(name, {
-      declarative: true,
-      deps: deps,
-      declare: declare
-    });
-  }
-
-  function registerDynamic(name, deps, executingRequire, execute) {
-    doRegister(name, {
-      declarative: false,
-      deps: deps,
-      executingRequire: executingRequire,
-      execute: execute
-    });
-  }
-
-  function doRegister(name, entry) {
-    entry.name = name;
-
-    // we never overwrite an existing define
-    if (!(name in defined))
-      defined[name] = entry;
-
-    // we have to normalize dependencies
-    // (assume dependencies are normalized for now)
-    // entry.normalizedDeps = entry.deps.map(normalize);
-    entry.normalizedDeps = entry.deps;
-  }
-
-
-  function buildGroups(entry, groups) {
-    groups[entry.groupIndex] = groups[entry.groupIndex] || [];
-
-    if (indexOf.call(groups[entry.groupIndex], entry) != -1)
-      return;
-
-    groups[entry.groupIndex].push(entry);
-
-    for (var i = 0, l = entry.normalizedDeps.length; i < l; i++) {
-      var depName = entry.normalizedDeps[i];
-      var depEntry = defined[depName];
-
-      // not in the registry means already linked / ES6
-      if (!depEntry || depEntry.evaluated)
-        continue;
-
-      // now we know the entry is in our unlinked linkage group
-      var depGroupIndex = entry.groupIndex + (depEntry.declarative != entry.declarative);
-
-      // the group index of an entry is always the maximum
-      if (depEntry.groupIndex === undefined || depEntry.groupIndex < depGroupIndex) {
-
-        // if already in a group, remove from the old group
-        if (depEntry.groupIndex !== undefined) {
-          groups[depEntry.groupIndex].splice(indexOf.call(groups[depEntry.groupIndex], depEntry), 1);
-
-          // if the old group is empty, then we have a mixed depndency cycle
-          if (groups[depEntry.groupIndex].length == 0)
-            throw new TypeError("Mixed dependency cycle detected");
-        }
-
-        depEntry.groupIndex = depGroupIndex;
-      }
-
-      buildGroups(depEntry, groups);
-    }
-  }
-
-  function link(name) {
-    var startEntry = defined[name];
-
-    startEntry.groupIndex = 0;
-
-    var groups = [];
-
-    buildGroups(startEntry, groups);
-
-    var curGroupDeclarative = !!startEntry.declarative == groups.length % 2;
-    for (var i = groups.length - 1; i >= 0; i--) {
-      var group = groups[i];
-      for (var j = 0; j < group.length; j++) {
-        var entry = group[j];
-
-        // link each group
-        if (curGroupDeclarative)
-          linkDeclarativeModule(entry);
-        else
-          linkDynamicModule(entry);
-      }
-      curGroupDeclarative = !curGroupDeclarative; 
-    }
-  }
-
-  // module binding records
-  var moduleRecords = {};
-  function getOrCreateModuleRecord(name) {
-    return moduleRecords[name] || (moduleRecords[name] = {
-      name: name,
-      dependencies: [],
-      exports: {}, // start from an empty module and extend
-      importers: []
-    })
-  }
-
-  function linkDeclarativeModule(entry) {
-    // only link if already not already started linking (stops at circular)
-    if (entry.module)
-      return;
-
-    var module = entry.module = getOrCreateModuleRecord(entry.name);
-    var exports = entry.module.exports;
-
-    var declaration = entry.declare.call(global, function(name, value) {
-      module.locked = true;
-
-      if (typeof name == 'object') {
-        for (var p in name)
-          exports[p] = name[p];
-      }
-      else {
-        exports[name] = value;
-      }
-
-      for (var i = 0, l = module.importers.length; i < l; i++) {
-        var importerModule = module.importers[i];
-        if (!importerModule.locked) {
-          for (var j = 0; j < importerModule.dependencies.length; ++j) {
-            if (importerModule.dependencies[j] === module) {
-              importerModule.setters[j](exports);
-            }
-          }
-        }
-      }
-
-      module.locked = false;
-      return value;
-    }, entry.name);
-
-    module.setters = declaration.setters;
-    module.execute = declaration.execute;
-
-    // now link all the module dependencies
-    for (var i = 0, l = entry.normalizedDeps.length; i < l; i++) {
-      var depName = entry.normalizedDeps[i];
-      var depEntry = defined[depName];
-      var depModule = moduleRecords[depName];
-
-      // work out how to set depExports based on scenarios...
-      var depExports;
-
-      if (depModule) {
-        depExports = depModule.exports;
-      }
-      else if (depEntry && !depEntry.declarative) {
-        depExports = depEntry.esModule;
-      }
-      // in the module registry
-      else if (!depEntry) {
-        depExports = load(depName);
-      }
-      // we have an entry -> link
-      else {
-        linkDeclarativeModule(depEntry);
-        depModule = depEntry.module;
-        depExports = depModule.exports;
-      }
-
-      // only declarative modules have dynamic bindings
-      if (depModule && depModule.importers) {
-        depModule.importers.push(module);
-        module.dependencies.push(depModule);
-      }
-      else
-        module.dependencies.push(null);
-
-      // run the setter for this dependency
-      if (module.setters[i])
-        module.setters[i](depExports);
-    }
-  }
-
-  // An analog to loader.get covering execution of all three layers (real declarative, simulated declarative, simulated dynamic)
-  function getModule(name) {
-    var exports;
-    var entry = defined[name];
-
-    if (!entry) {
-      exports = load(name);
-      if (!exports)
-        throw new Error("Unable to load dependency " + name + ".");
-    }
-
-    else {
-      if (entry.declarative)
-        ensureEvaluated(name, []);
-
-      else if (!entry.evaluated)
-        linkDynamicModule(entry);
-
-      exports = entry.module.exports;
-    }
-
-    if ((!entry || entry.declarative) && exports && exports.__useDefault)
-      return exports['default'];
-
-    return exports;
-  }
-
-  function linkDynamicModule(entry) {
-    if (entry.module)
-      return;
-
-    var exports = {};
-
-    var module = entry.module = { exports: exports, id: entry.name };
-
-    // AMD requires execute the tree first
-    if (!entry.executingRequire) {
-      for (var i = 0, l = entry.normalizedDeps.length; i < l; i++) {
-        var depName = entry.normalizedDeps[i];
-        var depEntry = defined[depName];
-        if (depEntry)
-          linkDynamicModule(depEntry);
-      }
-    }
-
-    // now execute
-    entry.evaluated = true;
-    var output = entry.execute.call(global, function(name) {
-      for (var i = 0, l = entry.deps.length; i < l; i++) {
-        if (entry.deps[i] != name)
-          continue;
-        return getModule(entry.normalizedDeps[i]);
-      }
-      throw new TypeError('Module ' + name + ' not declared as a dependency.');
-    }, exports, module);
-
-    if (output)
-      module.exports = output;
-
-    // create the esModule object, which allows ES6 named imports of dynamics
-    exports = module.exports;
- 
-    if (exports && exports.__esModule) {
-      entry.esModule = exports;
-    }
-    else {
-      entry.esModule = {};
-      
-      // don't trigger getters/setters in environments that support them
-      if ((typeof exports == 'object' || typeof exports == 'function') && exports !== global) {
-        if (getOwnPropertyDescriptor) {
-          var d;
-          for (var p in exports)
-            if (d = Object.getOwnPropertyDescriptor(exports, p))
-              defineProperty(entry.esModule, p, d);
-        }
-        else {
-          var hasOwnProperty = exports && exports.hasOwnProperty;
-          for (var p in exports) {
-            if (!hasOwnProperty || exports.hasOwnProperty(p))
-              entry.esModule[p] = exports[p];
-          }
-         }
-       }
-      entry.esModule['default'] = exports;
-      defineProperty(entry.esModule, '__useDefault', {
-        value: true
-      });
-    }
-  }
-
-  /*
-   * Given a module, and the list of modules for this current branch,
-   *  ensure that each of the dependencies of this module is evaluated
-   *  (unless one is a circular dependency already in the list of seen
-   *  modules, in which case we execute it)
-   *
-   * Then we evaluate the module itself depth-first left to right 
-   * execution to match ES6 modules
-   */
-  function ensureEvaluated(moduleName, seen) {
-    var entry = defined[moduleName];
-
-    // if already seen, that means it's an already-evaluated non circular dependency
-    if (!entry || entry.evaluated || !entry.declarative)
-      return;
-
-    // this only applies to declarative modules which late-execute
-
-    seen.push(moduleName);
-
-    for (var i = 0, l = entry.normalizedDeps.length; i < l; i++) {
-      var depName = entry.normalizedDeps[i];
-      if (indexOf.call(seen, depName) == -1) {
-        if (!defined[depName])
-          load(depName);
-        else
-          ensureEvaluated(depName, seen);
-      }
-    }
-
-    if (entry.evaluated)
-      return;
-
-    entry.evaluated = true;
-    entry.module.execute.call(global);
-  }
-
-  // magical execution function
-  var modules = {};
-  function load(name) {
-    if (modules[name])
-      return modules[name];
-
-    // node core modules
-    if (name.substr(0, 6) == '@node/')
-      return require(name.substr(6));
-
-    var entry = defined[name];
-
-    // first we check if this module has already been defined in the registry
-    if (!entry)
-      throw "Module " + name + " not present.";
-
-    // recursively ensure that the module and all its 
-    // dependencies are linked (with dependency group handling)
-    link(name);
-
-    // now handle dependency execution in correct order
-    ensureEvaluated(name, []);
-
-    // remove from the registry
-    defined[name] = undefined;
-
-    // exported modules get __esModule defined for interop
-    if (entry.declarative)
-      defineProperty(entry.module.exports, '__esModule', { value: true });
-
-    // return the defined module object
-    return modules[name] = entry.declarative ? entry.module.exports : entry.esModule;
-  };
-
-  return function(mains, depNames, declare) {
-    return function(formatDetect) {
-      formatDetect(function(deps) {
-        var System = {
-          _nodeRequire: typeof require != 'undefined' && require.resolve && typeof process != 'undefined' && require,
-          register: register,
-          registerDynamic: registerDynamic,
-          get: load, 
-          set: function(name, module) {
-            modules[name] = module; 
-          },
-          newModule: function(module) {
-            return module;
-          }
-        };
-        System.set('@empty', {});
-
-        // register external dependencies
-        for (var i = 0; i < depNames.length; i++) (function(depName, dep) {
-          if (dep && dep.__esModule)
-            System.register(depName, [], function(_export) {
-              return {
-                setters: [],
-                execute: function() {
-                  for (var p in dep)
-                    if (p != '__esModule' && !(typeof p == 'object' && p + '' == 'Module'))
-                      _export(p, dep[p]);
-                }
-              };
-            });
-          else
-            System.registerDynamic(depName, [], false, function() {
-              return dep;
-            });
-        })(depNames[i], arguments[i]);
-
-        // register modules in this bundle
-        declare(System);
-
-        // load mains
-        var firstLoad = load(mains[0]);
-        if (mains.length > 1)
-          for (var i = 1; i < mains.length; i++)
-            load(mains[i]);
-
-        if (firstLoad.__useDefault)
-          return firstLoad['default'];
-        else
-          return firstLoad;
-      });
-    };
-  };
-
-})(typeof self != 'undefined' ? self : global)
-/* (['mainModule'], ['external-dep'], function($__System) {
-  System.register(...);
-})
-(function(factory) {
-  if (typeof define && define.amd)
-    define(['external-dep'], factory);
-  // etc UMD / module pattern
-})*/
-
-(["1"], [], function($__System) {
-
-(function(__global) {
-  var loader = $__System;
-  var hasOwnProperty = Object.prototype.hasOwnProperty;
-  var indexOf = Array.prototype.indexOf || function(item) {
-    for (var i = 0, l = this.length; i < l; i++)
-      if (this[i] === item)
-        return i;
-    return -1;
-  }
-
-  function readMemberExpression(p, value) {
-    var pParts = p.split('.');
-    while (pParts.length)
-      value = value[pParts.shift()];
-    return value;
-  }
-
-  // bare minimum ignores for IE8
-  var ignoredGlobalProps = ['_g', 'sessionStorage', 'localStorage', 'clipboardData', 'frames', 'frameElement', 'external', 'mozAnimationStartTime', 'webkitStorageInfo', 'webkitIndexedDB'];
-
-  var globalSnapshot;
-
-  function forEachGlobal(callback) {
-    if (Object.keys)
-      Object.keys(__global).forEach(callback);
-    else
-      for (var g in __global) {
-        if (!hasOwnProperty.call(__global, g))
-          continue;
-        callback(g);
-      }
-  }
-
-  function forEachGlobalValue(callback) {
-    forEachGlobal(function(globalName) {
-      if (indexOf.call(ignoredGlobalProps, globalName) != -1)
-        return;
-      try {
-        var value = __global[globalName];
-      }
-      catch (e) {
-        ignoredGlobalProps.push(globalName);
-      }
-      callback(globalName, value);
-    });
-  }
-
-  loader.set('@@global-helpers', loader.newModule({
-    prepareGlobal: function(moduleName, exportName, globals) {
-      // disable module detection
-      var curDefine = __global.define;
-       
-      __global.define = undefined;
-      __global.exports = undefined;
-      if (__global.module && __global.module.exports)
-        __global.module = undefined;
-
-      // set globals
-      var oldGlobals;
-      if (globals) {
-        oldGlobals = {};
-        for (var g in globals) {
-          oldGlobals[g] = __global[g];
-          __global[g] = globals[g];
-        }
-      }
-
-      // store a complete copy of the global object in order to detect changes
-      if (!exportName) {
-        globalSnapshot = {};
-
-        forEachGlobalValue(function(name, value) {
-          globalSnapshot[name] = value;
-        });
-      }
-
-      // return function to retrieve global
-      return function() {
-        var globalValue;
-
-        if (exportName) {
-          globalValue = readMemberExpression(exportName, __global);
-        }
-        else {
-          var singleGlobal;
-          var multipleExports;
-          var exports = {};
-
-          forEachGlobalValue(function(name, value) {
-            if (globalSnapshot[name] === value)
-              return;
-            if (typeof value == 'undefined')
-              return;
-            exports[name] = value;
-
-            if (typeof singleGlobal != 'undefined') {
-              if (!multipleExports && singleGlobal !== value)
-                multipleExports = true;
-            }
-            else {
-              singleGlobal = value;
-            }
-          });
-          globalValue = multipleExports ? exports : singleGlobal;
-        }
-
-        // revert globals
-        if (oldGlobals) {
-          for (var g in oldGlobals)
-            __global[g] = oldGlobals[g];
-        }
-        __global.define = curDefine;
-
-        return globalValue;
-      };
-    }
-  }));
-
-})(typeof self != 'undefined' ? self : global);
-
-(function() {
-  var loader = $__System;
-  
-  if (typeof window != 'undefined' && typeof document != 'undefined' && window.location)
-    var windowOrigin = location.protocol + '//' + location.hostname + (location.port ? ':' + location.port : '');
-
-  loader.set('@@cjs-helpers', loader.newModule({
-    getPathVars: function(moduleId) {
-      // remove any plugin syntax
-      var pluginIndex = moduleId.lastIndexOf('!');
-      var filename;
-      if (pluginIndex != -1)
-        filename = moduleId.substr(0, pluginIndex);
-      else
-        filename = moduleId;
-
-      var dirname = filename.split('/');
-      dirname.pop();
-      dirname = dirname.join('/');
-
-      if (filename.substr(0, 8) == 'file:///') {
-        filename = filename.substr(7);
-        dirname = dirname.substr(7);
-
-        // on windows remove leading '/'
-        if (isWindows) {
-          filename = filename.substr(1);
-          dirname = dirname.substr(1);
-        }
-      }
-      else if (windowOrigin && filename.substr(0, windowOrigin.length) === windowOrigin) {
-        filename = filename.substr(windowOrigin.length);
-        dirname = dirname.substr(windowOrigin.length);
-      }
-
-      return {
-        filename: filename,
-        dirname: dirname
-      };
-    }
-  }));
-})();
-
+!function(e){function r(e,r,o){return 4===arguments.length?t.apply(this,arguments):void n(e,{declarative:!0,deps:r,declare:o})}function t(e,r,t,o){n(e,{declarative:!1,deps:r,executingRequire:t,execute:o})}function n(e,r){r.name=e,e in v||(v[e]=r),r.normalizedDeps=r.deps}function o(e,r){if(r[e.groupIndex]=r[e.groupIndex]||[],-1==g.call(r[e.groupIndex],e)){r[e.groupIndex].push(e);for(var t=0,n=e.normalizedDeps.length;n>t;t++){var a=e.normalizedDeps[t],u=v[a];if(u&&!u.evaluated){var d=e.groupIndex+(u.declarative!=e.declarative);if(void 0===u.groupIndex||u.groupIndex<d){if(void 0!==u.groupIndex&&(r[u.groupIndex].splice(g.call(r[u.groupIndex],u),1),0==r[u.groupIndex].length))throw new TypeError("Mixed dependency cycle detected");u.groupIndex=d}o(u,r)}}}}function a(e){var r=v[e];r.groupIndex=0;var t=[];o(r,t);for(var n=!!r.declarative==t.length%2,a=t.length-1;a>=0;a--){for(var u=t[a],i=0;i<u.length;i++){var s=u[i];n?d(s):l(s)}n=!n}}function u(e){return y[e]||(y[e]={name:e,dependencies:[],exports:{},importers:[]})}function d(r){if(!r.module){var t=r.module=u(r.name),n=r.module.exports,o=r.declare.call(e,function(e,r){if(t.locked=!0,"object"==typeof e)for(var o in e)n[o]=e[o];else n[e]=r;for(var a=0,u=t.importers.length;u>a;a++){var d=t.importers[a];if(!d.locked)for(var i=0;i<d.dependencies.length;++i)d.dependencies[i]===t&&d.setters[i](n)}return t.locked=!1,r},r.name);t.setters=o.setters,t.execute=o.execute;for(var a=0,i=r.normalizedDeps.length;i>a;a++){var l,s=r.normalizedDeps[a],c=v[s],f=y[s];f?l=f.exports:c&&!c.declarative?l=c.esModule:c?(d(c),f=c.module,l=f.exports):l=p(s),f&&f.importers?(f.importers.push(t),t.dependencies.push(f)):t.dependencies.push(null),t.setters[a]&&t.setters[a](l)}}}function i(e){var r,t=v[e];if(t)t.declarative?f(e,[]):t.evaluated||l(t),r=t.module.exports;else if(r=p(e),!r)throw new Error("Unable to load dependency "+e+".");return(!t||t.declarative)&&r&&r.__useDefault?r["default"]:r}function l(r){if(!r.module){var t={},n=r.module={exports:t,id:r.name};if(!r.executingRequire)for(var o=0,a=r.normalizedDeps.length;a>o;o++){var u=r.normalizedDeps[o],d=v[u];d&&l(d)}r.evaluated=!0;var c=r.execute.call(e,function(e){for(var t=0,n=r.deps.length;n>t;t++)if(r.deps[t]==e)return i(r.normalizedDeps[t]);throw new TypeError("Module "+e+" not declared as a dependency.")},t,n);c&&(n.exports=c),t=n.exports,t&&t.__esModule?r.esModule=t:r.esModule=s(t)}}function s(r){var t={};if(("object"==typeof r||"function"==typeof r)&&r!==e)if(m)for(var n in r)"default"!==n&&c(t,r,n);else{var o=r&&r.hasOwnProperty;for(var n in r)"default"===n||o&&!r.hasOwnProperty(n)||(t[n]=r[n])}return t["default"]=r,x(t,"__useDefault",{value:!0}),t}function c(e,r,t){try{var n;(n=Object.getOwnPropertyDescriptor(r,t))&&x(e,t,n)}catch(o){return e[t]=r[t],!1}}function f(r,t){var n=v[r];if(n&&!n.evaluated&&n.declarative){t.push(r);for(var o=0,a=n.normalizedDeps.length;a>o;o++){var u=n.normalizedDeps[o];-1==g.call(t,u)&&(v[u]?f(u,t):p(u))}n.evaluated||(n.evaluated=!0,n.module.execute.call(e))}}function p(e){if(I[e])return I[e];if("@node/"==e.substr(0,6))return D(e.substr(6));var r=v[e];if(!r)throw"Module "+e+" not present.";return a(e),f(e,[]),v[e]=void 0,r.declarative&&x(r.module.exports,"__esModule",{value:!0}),I[e]=r.declarative?r.module.exports:r.esModule}var v={},g=Array.prototype.indexOf||function(e){for(var r=0,t=this.length;t>r;r++)if(this[r]===e)return r;return-1},m=!0;try{Object.getOwnPropertyDescriptor({a:0},"a")}catch(h){m=!1}var x;!function(){try{Object.defineProperty({},"a",{})&&(x=Object.defineProperty)}catch(e){x=function(e,r,t){try{e[r]=t.value||t.get.call(e)}catch(n){}}}}();var y={},D="undefined"!=typeof System&&System._nodeRequire||"undefined"!=typeof require&&require.resolve&&"undefined"!=typeof process&&require,I={"@empty":{}};return function(e,n,o,a){return function(u){u(function(u){for(var d={_nodeRequire:D,register:r,registerDynamic:t,get:p,set:function(e,r){I[e]=r},newModule:function(e){return e}},i=0;i<n.length;i++)(function(e,r){r&&r.__esModule?I[e]=r:I[e]=s(r)})(n[i],arguments[i]);a(d);var l=p(e[0]);if(e.length>1)for(var i=1;i<e.length;i++)p(e[i]);return o?l["default"]:l})}}}("undefined"!=typeof self?self:global)
+
+(["1"], [], false, function($__System) {
+var require = this.require, exports = this.exports, module = this.module;
+!function(e){function r(e,r){for(var n=e.split(".");n.length;)r=r[n.shift()];return r}function n(n){if("string"==typeof n)return r(n,e);if(!(n instanceof Array))throw new Error("Global exports must be a string or array.");for(var t={},o=!0,f=0;f<n.length;f++){var i=r(n[f],e);o&&(t["default"]=i,o=!1),t[n[f].split(".").pop()]=i}return t}function t(r){if(Object.keys)Object.keys(e).forEach(r);else for(var n in e)a.call(e,n)&&r(n)}function o(r){t(function(n){if(-1==l.call(s,n)){try{var t=e[n]}catch(o){s.push(n)}r(n,t)}})}var f,i=$__System,a=Object.prototype.hasOwnProperty,l=Array.prototype.indexOf||function(e){for(var r=0,n=this.length;n>r;r++)if(this[r]===e)return r;return-1},s=["_g","sessionStorage","localStorage","clipboardData","frames","frameElement","external","mozAnimationStartTime","webkitStorageInfo","webkitIndexedDB","mozInnerScreenY","mozInnerScreenX"];i.set("@@global-helpers",i.newModule({prepareGlobal:function(r,t,i){var a=e.define;e.define=void 0;var l;if(i){l={};for(var s in i)l[s]=e[s],e[s]=i[s]}return t||(f={},o(function(e,r){f[e]=r})),function(){var r;if(t)r=n(t);else{r={};var i,s;o(function(e,n){f[e]!==n&&"undefined"!=typeof n&&(r[e]=n,"undefined"!=typeof i?s||i===n||(s=!0):i=n)}),r=s?r:i}if(l)for(var u in l)e[u]=l[u];return e.define=a,r}}}))}("undefined"!=typeof self?self:global);
 $__System.registerDynamic("2", ["3"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = $__require('3');
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("4", ["2"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = $__require('2');
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("5", ["6"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var _Object$defineProperty = $__require('6')["default"];
   exports["default"] = function(target, key, descriptors) {
     var _descriptor = descriptors[key];
@@ -648,7 +40,6 @@ $__System.registerDynamic("5", ["6"], true, function($__require, exports, module
     _Object$defineProperty(target, key, descriptor);
   };
   exports.__esModule = true;
-  global.define = __define;
   return module.exports;
 });
 
@@ -862,9 +253,9 @@ $__System.register('10', ['8', '9', '11', 'b', 'c', 'd', 'e', 'f'], function (_e
 });
 $__System.registerDynamic("12", ["13", "14", "15"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var $export = $__require('13'),
       core = $__require('14'),
       fails = $__require('15');
@@ -876,58 +267,54 @@ $__System.registerDynamic("12", ["13", "14", "15"], true, function($__require, e
       fn(1);
     }), 'Object', exp);
   };
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("16", ["17", "12"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var toIObject = $__require('17');
   $__require('12')('getOwnPropertyDescriptor', function($getOwnPropertyDescriptor) {
     return function getOwnPropertyDescriptor(it, key) {
       return $getOwnPropertyDescriptor(toIObject(it), key);
     };
   });
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("18", ["19", "16"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var $ = $__require('19');
   $__require('16');
   module.exports = function getOwnPropertyDescriptor(it, key) {
     return $.getDesc(it, key);
   };
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("1a", ["18"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = {
     "default": $__require('18'),
     __esModule: true
   };
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("b", ["1a"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var _Object$getOwnPropertyDescriptor = $__require('1a')["default"];
   exports["default"] = function get(_x, _x2, _x3) {
     var _again = true;
@@ -963,41 +350,38 @@ $__System.registerDynamic("b", ["1a"], true, function($__require, exports, modul
     }
   };
   exports.__esModule = true;
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("1b", ["19"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var $ = $__require('19');
   module.exports = function create(P, D) {
     return $.create(P, D);
   };
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("1c", ["1b"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = {
     "default": $__require('1b'),
     __esModule: true
   };
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("1d", ["19", "1e", "1f", "20"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var getDesc = $__require('19').getDesc,
       isObject = $__require('1e'),
       anObject = $__require('1f');
@@ -1026,51 +410,47 @@ $__System.registerDynamic("1d", ["19", "1e", "1f", "20"], true, function($__requ
     }({}, false) : undefined),
     check: check
   };
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("21", ["13", "1d"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var $export = $__require('13');
   $export($export.S, 'Object', {setPrototypeOf: $__require('1d').set});
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("22", ["21", "14"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   $__require('21');
   module.exports = $__require('14').Object.setPrototypeOf;
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("23", ["22"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = {
     "default": $__require('22'),
     __esModule: true
   };
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("c", ["1c", "23"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var _Object$create = $__require('1c')["default"];
   var _Object$setPrototypeOf = $__require('23')["default"];
   exports["default"] = function(subClass, superClass) {
@@ -1087,16 +467,15 @@ $__System.registerDynamic("c", ["1c", "23"], true, function($__require, exports,
       _Object$setPrototypeOf ? _Object$setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass;
   };
   exports.__esModule = true;
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("d", ["6"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var _Object$defineProperty = $__require('6')["default"];
   exports["default"] = (function() {
     function defineProperties(target, descriptors, initializers) {
@@ -1136,16 +515,15 @@ $__System.registerDynamic("d", ["6"], true, function($__require, exports, module
     };
   })();
   exports.__esModule = true;
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("24", ["6"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var _Object$defineProperty = $__require('6')["default"];
   exports["default"] = (function() {
     function defineProperties(target, props) {
@@ -1167,71 +545,66 @@ $__System.registerDynamic("24", ["6"], true, function($__require, exports, modul
     };
   })();
   exports.__esModule = true;
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("e", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   exports["default"] = function(instance, Constructor) {
     if (!(instance instanceof Constructor)) {
       throw new TypeError("Cannot call a class as a function");
     }
   };
   exports.__esModule = true;
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("25", [], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = function() {};
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("26", [], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = function(done, value) {
     return {
       value: value,
       done: !!done
     };
   };
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("17", ["27", "28"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var IObject = $__require('27'),
       defined = $__require('28');
   module.exports = function(it) {
     return IObject(defined(it));
   };
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("29", ["25", "26", "2a", "17", "2b"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var addToUnscopables = $__require('25'),
       step = $__require('26'),
       Iterators = $__require('2a'),
@@ -1258,27 +631,25 @@ $__System.registerDynamic("29", ["25", "26", "2a", "17", "2b"], true, function($
   addToUnscopables('keys');
   addToUnscopables('values');
   addToUnscopables('entries');
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("2c", ["29", "2a"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   $__require('29');
   var Iterators = $__require('2a');
   Iterators.NodeList = Iterators.HTMLCollection = Iterators.Array;
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("2d", ["1f", "2e", "14"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var anObject = $__require('1f'),
       get = $__require('2e');
   module.exports = $__require('14').getIterator = function(it) {
@@ -1287,32 +658,29 @@ $__System.registerDynamic("2d", ["1f", "2e", "14"], true, function($__require, e
       throw TypeError(it + ' is not iterable!');
     return anObject(iterFn.call(it));
   };
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("2f", ["2c", "30", "2d"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   $__require('2c');
   $__require('30');
   module.exports = $__require('2d');
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("31", ["2f"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = {
     "default": $__require('2f'),
     __esModule: true
   };
-  global.define = __define;
   return module.exports;
 });
 
@@ -1764,8 +1132,8 @@ $__System.register('37', ['8', '9', 'b', 'c', 'd', 'e', 'a'], function (_export)
     }
   };
 });
-$__System.registerDynamic("38", [], false, function(__require, __exports, __module) {
-  var _retrieveGlobal = $__System.get("@@global-helpers").prepareGlobal(__module.id, null, null);
+$__System.registerDynamic("38", [], false, function($__require, $__exports, $__module) {
+  var _retrieveGlobal = $__System.get("@@global-helpers").prepareGlobal($__module.id, null, null);
   (function() {
     (function() {
       'use strict';
@@ -2096,11 +1464,10 @@ $__System.registerDynamic("38", [], false, function(__require, __exports, __modu
 
 $__System.registerDynamic("a", ["38"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = $__require('38');
-  global.define = __define;
   return module.exports;
 });
 
@@ -2345,7 +1712,7 @@ $__System.register('39', ['5', '7', '8', '9', '10', '11', '37', 'b', 'c', 'd', '
     }
   };
 });
-$__System.register('3a', ['3b', '3c', '3d'], function (_export) {
+$__System.register('3a', ['3d', '3b', '3c'], function (_export) {
   'use strict';
 
   var React, classnames, dom, button;
@@ -2372,19 +1739,19 @@ $__System.register('3a', ['3b', '3c', '3d'], function (_export) {
   }
 
   return {
-    setters: [function (_b) {
-      React = _b['default'];
+    setters: [function (_d) {
+      React = _d['default'];
+    }, function (_b) {
+      classnames = _b['default'];
     }, function (_c) {
-      classnames = _c['default'];
-    }, function (_d) {
-      dom = _d.dom;
+      dom = _c.dom;
     }],
     execute: function () {
       button = dom(React, 'button');
     }
   };
 });
-$__System.register('3e', ['f', '3b', '3d', '3a'], function (_export) {
+$__System.register('3e', ['f', '3d', '3c', '3a'], function (_export) {
   var _toConsumableArray, React, dom, Tab, nav, tab;
 
   function render(_ref) {
@@ -2433,10 +1800,10 @@ $__System.register('3e', ['f', '3b', '3d', '3a'], function (_export) {
   return {
     setters: [function (_f) {
       _toConsumableArray = _f['default'];
-    }, function (_b) {
-      React = _b['default'];
     }, function (_d) {
-      dom = _d.dom;
+      React = _d['default'];
+    }, function (_c) {
+      dom = _c.dom;
     }, function (_a) {
       Tab = _a['default'];
     }],
@@ -2452,16 +1819,16 @@ $__System.register('3e', ['f', '3b', '3d', '3a'], function (_export) {
 });
 
 // Connection tabs
-$__System.register('3f', ['3b', '3d'], function (_export) {
+$__System.register('3f', ['3d', '3c'], function (_export) {
   'use strict';
 
   var React, dom, _dom, div, button;
 
   return {
-    setters: [function (_b) {
-      React = _b['default'];
-    }, function (_d) {
-      dom = _d.dom;
+    setters: [function (_d) {
+      React = _d['default'];
+    }, function (_c) {
+      dom = _c.dom;
     }],
     execute: function () {
       _dom = dom(React, 'div', 'button');
@@ -2494,7 +1861,7 @@ $__System.register('3f', ['3b', '3d'], function (_export) {
     }
   };
 });
-$__System.register('40', ['3b', '3d', '3f'], function (_export) {
+$__System.register('40', ['3d', '3c', '3f'], function (_export) {
   'use strict';
 
   var React, dom, BookmarkItem, div, button;
@@ -2514,10 +1881,10 @@ $__System.register('40', ['3b', '3d', '3f'], function (_export) {
   }
 
   return {
-    setters: [function (_b) {
-      React = _b['default'];
-    }, function (_d) {
-      dom = _d.dom;
+    setters: [function (_d) {
+      React = _d['default'];
+    }, function (_c) {
+      dom = _c.dom;
     }, function (_f) {
       BookmarkItem = _f['default'];
     }],
@@ -2528,7 +1895,7 @@ $__System.register('40', ['3b', '3d', '3f'], function (_export) {
     }
   };
 });
-$__System.register('41', ['40', 'f', '3b', '3d', '3f'], function (_export) {
+$__System.register('41', ['40', 'f', '3d', '3c', '3f'], function (_export) {
   var AddButton, _toConsumableArray, React, dom, BookmarkItem, div, bookmarkItem, addButton;
 
   return {
@@ -2536,10 +1903,10 @@ $__System.register('41', ['40', 'f', '3b', '3d', '3f'], function (_export) {
       AddButton = _['default'];
     }, function (_f) {
       _toConsumableArray = _f['default'];
-    }, function (_b) {
-      React = _b['default'];
     }, function (_d) {
-      dom = _d.dom;
+      React = _d['default'];
+    }, function (_c) {
+      dom = _c.dom;
     }, function (_f2) {
       BookmarkItem = _f2['default'];
     }],
@@ -2583,7 +1950,7 @@ $__System.register('41', ['40', 'f', '3b', '3d', '3f'], function (_export) {
 });
 
 // Bookmarks
-$__System.register('42', ['3b', '3d'], function (_export) {
+$__System.register('42', ['3d', '3c'], function (_export) {
   'use strict';
 
   var React, dom, _dom, div, form, label, input, button;
@@ -2649,10 +2016,10 @@ $__System.register('42', ['3b', '3d'], function (_export) {
   }
 
   return {
-    setters: [function (_b) {
-      React = _b['default'];
-    }, function (_d) {
-      dom = _d.dom;
+    setters: [function (_d) {
+      React = _d['default'];
+    }, function (_c) {
+      dom = _c.dom;
     }],
     execute: function () {
       _dom = dom(React, 'div', 'form', 'label', 'input', 'button');
@@ -2664,7 +2031,7 @@ $__System.register('42', ['3b', '3d'], function (_export) {
     }
   };
 });
-$__System.register('43', ['3b', '3d'], function (_export) {
+$__System.register('43', ['3d', '3c'], function (_export) {
   'use strict';
 
   var React, dom, div, button;
@@ -2710,10 +2077,10 @@ $__System.register('43', ['3b', '3d'], function (_export) {
   }
 
   return {
-    setters: [function (_b) {
-      React = _b['default'];
-    }, function (_d) {
-      dom = _d.dom;
+    setters: [function (_d) {
+      React = _d['default'];
+    }, function (_c) {
+      dom = _c.dom;
     }],
     execute: function () {
       div = dom(React, 'div');
@@ -2721,16 +2088,16 @@ $__System.register('43', ['3b', '3d'], function (_export) {
     }
   };
 });
-$__System.register('44', ['f', '3b', '3d'], function (_export) {
+$__System.register('44', ['f', '3d', '3c'], function (_export) {
   var _toConsumableArray, React, dom, div, button;
 
   return {
     setters: [function (_f) {
       _toConsumableArray = _f['default'];
-    }, function (_b) {
-      React = _b['default'];
     }, function (_d) {
-      dom = _d.dom;
+      React = _d['default'];
+    }, function (_c) {
+      dom = _c.dom;
     }],
     execute: function () {
       'use strict';
@@ -2777,7 +2144,7 @@ $__System.register('44', ['f', '3b', '3d'], function (_export) {
     }
   };
 });
-$__System.register('45', ['3b', '3d'], function (_export) {
+$__System.register('45', ['3d', '3c'], function (_export) {
   'use strict';
 
   var React, dom, div;
@@ -2792,17 +2159,17 @@ $__System.register('45', ['3b', '3d'], function (_export) {
   }
 
   return {
-    setters: [function (_b) {
-      React = _b['default'];
-    }, function (_d) {
-      dom = _d.dom;
+    setters: [function (_d) {
+      React = _d['default'];
+    }, function (_c) {
+      dom = _c.dom;
     }],
     execute: function () {
       div = dom(React, 'div');
     }
   };
 });
-$__System.register('46', ['43', '44', '45', '3b', '3d'], function (_export) {
+$__System.register('46', ['43', '44', '45', '3d', '3c'], function (_export) {
   'use strict';
 
   var Toolbar, Listing, Empty, React, dom, elif, section, toolbar, listing;
@@ -2845,11 +2212,11 @@ $__System.register('46', ['43', '44', '45', '3b', '3d'], function (_export) {
       Listing = _2['default'];
     }, function (_3) {
       Empty = _3['default'];
-    }, function (_b) {
-      React = _b['default'];
     }, function (_d) {
-      dom = _d.dom;
-      elif = _d.elif;
+      React = _d['default'];
+    }, function (_c) {
+      dom = _c.dom;
+      elif = _c.elif;
     }],
     execute: function () {
       section = dom(React, 'section');
@@ -2858,37 +2225,161 @@ $__System.register('46', ['43', '44', '45', '3b', '3d'], function (_export) {
     }
   };
 });
-$__System.registerDynamic("47", ["48"], true, function($__require, exports, module) {
+$__System.registerDynamic("47", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var ReactMount = $__require('48');
-  module.exports = ReactMount.renderSubtreeIntoContainer;
-  global.define = __define;
+  var define,
+      global = this,
+      GLOBAL = this;
+  "format cjs";
+  (function(global) {
+    var b = /^(b|B)$/;
+    var symbol = {
+      iec: {
+        bits: ["b", "Kib", "Mib", "Gib", "Tib", "Pib", "Eib", "Zib", "Yib"],
+        bytes: ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB"]
+      },
+      jedec: {
+        bits: ["b", "Kb", "Mb", "Gb", "Tb", "Pb", "Eb", "Zb", "Yb"],
+        bytes: ["B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"]
+      }
+    };
+    function filesize(arg) {
+      var descriptor = arguments.length <= 1 || arguments[1] === undefined ? {} : arguments[1];
+      var result = [],
+          val = 0,
+          e = void 0,
+          base = void 0,
+          bits = void 0,
+          ceil = void 0,
+          neg = void 0,
+          num = void 0,
+          output = void 0,
+          round = void 0,
+          unix = void 0,
+          spacer = void 0,
+          standard = void 0,
+          symbols = void 0;
+      if (isNaN(arg)) {
+        throw new Error("Invalid arguments");
+      }
+      bits = descriptor.bits === true;
+      unix = descriptor.unix === true;
+      base = descriptor.base || 2;
+      round = descriptor.round !== undefined ? descriptor.round : unix ? 1 : 2;
+      spacer = descriptor.spacer !== undefined ? descriptor.spacer : unix ? "" : " ";
+      symbols = descriptor.symbols || descriptor.suffixes || {};
+      standard = base === 2 ? descriptor.standard || "jedec" : "jedec";
+      output = descriptor.output || "string";
+      e = descriptor.exponent !== undefined ? descriptor.exponent : -1;
+      num = Number(arg);
+      neg = num < 0;
+      ceil = base > 2 ? 1000 : 1024;
+      if (neg) {
+        num = -num;
+      }
+      if (num === 0) {
+        result[0] = 0;
+        result[1] = unix ? "" : !bits ? "B" : "b";
+      } else {
+        if (e === -1 || isNaN(e)) {
+          e = Math.floor(Math.log(num) / Math.log(ceil));
+          if (e < 0) {
+            e = 0;
+          }
+        }
+        if (e > 8) {
+          e = 8;
+        }
+        val = base === 2 ? num / Math.pow(2, e * 10) : num / Math.pow(1000, e);
+        if (bits) {
+          val = val * 8;
+          if (val > ceil && e < 8) {
+            val = val / ceil;
+            e++;
+          }
+        }
+        result[0] = Number(val.toFixed(e > 0 ? round : 0));
+        result[1] = base === 10 && e === 1 ? bits ? "kb" : "kB" : symbol[standard][bits ? "bits" : "bytes"][e];
+        if (unix) {
+          result[1] = standard === "jedec" ? result[1].charAt(0) : e > 0 ? result[1].replace(/B$/, "") : result[1];
+          if (b.test(result[1])) {
+            result[0] = Math.floor(result[0]);
+            result[1] = "";
+          }
+        }
+      }
+      if (neg) {
+        result[0] = -result[0];
+      }
+      result[1] = symbols[result[1]] || result[1];
+      if (output === "array") {
+        return result;
+      }
+      if (output === "exponent") {
+        return e;
+      }
+      if (output === "object") {
+        return {
+          value: result[0],
+          suffix: result[1],
+          symbol: result[1]
+        };
+      }
+      return result.join(spacer);
+    }
+    if (typeof exports !== "undefined") {
+      module.exports = filesize;
+    } else if (typeof define === "function" && define.amd) {
+      define(function() {
+        return filesize;
+      });
+    } else {
+      global.filesize = filesize;
+    }
+  })(typeof window !== "undefined" ? window : global);
   return module.exports;
 });
 
-$__System.registerDynamic("3", ["4a", "4b", "4c", "4d", "48", "4e", "4f", "50", "51", "52", "47", "53", "54", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("48", ["47"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
+  module.exports = $__require('47');
+  return module.exports;
+});
+
+$__System.registerDynamic("49", ["4a"], true, function($__require, exports, module) {
+  "use strict";
+  ;
+  var define,
+      global = this,
+      GLOBAL = this;
+  var ReactMount = $__require('4a');
+  module.exports = ReactMount.renderSubtreeIntoContainer;
+  return module.exports;
+});
+
+$__System.registerDynamic("3", ["4b", "4c", "4d", "4e", "4a", "4f", "50", "51", "52", "53", "49", "55", "56", "54"], true, function($__require, exports, module) {
+  ;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactCurrentOwner = $__require('4a');
-    var ReactDOMTextComponent = $__require('4b');
-    var ReactDefaultInjection = $__require('4c');
-    var ReactInstanceHandles = $__require('4d');
-    var ReactMount = $__require('48');
-    var ReactPerf = $__require('4e');
-    var ReactReconciler = $__require('4f');
-    var ReactUpdates = $__require('50');
-    var ReactVersion = $__require('51');
-    var findDOMNode = $__require('52');
-    var renderSubtreeIntoContainer = $__require('47');
-    var warning = $__require('53');
+    var ReactCurrentOwner = $__require('4b');
+    var ReactDOMTextComponent = $__require('4c');
+    var ReactDefaultInjection = $__require('4d');
+    var ReactInstanceHandles = $__require('4e');
+    var ReactMount = $__require('4a');
+    var ReactPerf = $__require('4f');
+    var ReactReconciler = $__require('50');
+    var ReactUpdates = $__require('51');
+    var ReactVersion = $__require('52');
+    var findDOMNode = $__require('53');
+    var renderSubtreeIntoContainer = $__require('49');
+    var warning = $__require('55');
     ReactDefaultInjection.inject();
     var render = ReactPerf.measure('React', 'render', ReactMount.render);
     var React = {
@@ -2908,8 +2399,8 @@ $__System.registerDynamic("3", ["4a", "4b", "4c", "4d", "48", "4e", "4f", "50", 
         TextComponent: ReactDOMTextComponent
       });
     }
-    if (process.env.NODE_ENV !== 'production') {
-      var ExecutionEnvironment = $__require('54');
+    if ("production" !== 'production') {
+      var ExecutionEnvironment = $__require('56');
       if (ExecutionEnvironment.canUseDOM && window.top === window.self) {
         if (typeof __REACT_DEVTOOLS_GLOBAL_HOOK__ === 'undefined') {
           if (navigator.userAgent.indexOf('Chrome') > -1 && navigator.userAgent.indexOf('Edge') === -1 || navigator.userAgent.indexOf('Firefox') > -1) {
@@ -2917,7 +2408,7 @@ $__System.registerDynamic("3", ["4a", "4b", "4c", "4d", "48", "4e", "4f", "50", 
           }
         }
         var ieCompatibilityMode = document.documentMode && document.documentMode < 8;
-        process.env.NODE_ENV !== 'production' ? warning(!ieCompatibilityMode, 'Internet Explorer is running in compatibility mode; please add the ' + 'following tag to your HTML to prevent this from happening: ' + '<meta http-equiv="X-UA-Compatible" content="IE=edge" />') : undefined;
+        "production" !== 'production' ? warning(!ieCompatibilityMode, 'Internet Explorer is running in compatibility mode; please add the ' + 'following tag to your HTML to prevent this from happening: ' + '<meta http-equiv="X-UA-Compatible" content="IE=edge" />') : undefined;
         var expectedFeatures = [Array.isArray, Array.prototype.every, Array.prototype.forEach, Array.prototype.indexOf, Array.prototype.map, Date.now, Function.prototype.bind, Object.keys, String.prototype.split, String.prototype.trim, Object.create, Object.freeze];
         for (var i = 0; i < expectedFeatures.length; i++) {
           if (!expectedFeatures[i]) {
@@ -2928,20 +2419,19 @@ $__System.registerDynamic("3", ["4a", "4b", "4c", "4d", "48", "4e", "4f", "50", 
       }
     }
     module.exports = React;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("55", ["56", "57", "58"], true, function($__require, exports, module) {
+$__System.registerDynamic("57", ["58", "59", "5a"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var PooledClass = $__require('56');
-  var assign = $__require('57');
-  var getTextContentAccessor = $__require('58');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var PooledClass = $__require('58');
+  var assign = $__require('59');
+  var getTextContentAccessor = $__require('5a');
   function FallbackCompositionState(root) {
     this._root = root;
     this._startText = this.getText();
@@ -2987,57 +2477,54 @@ $__System.registerDynamic("55", ["56", "57", "58"], true, function($__require, e
   });
   PooledClass.addPoolingTo(FallbackCompositionState);
   module.exports = FallbackCompositionState;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("59", ["5a"], true, function($__require, exports, module) {
+$__System.registerDynamic("5b", ["5c"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var SyntheticEvent = $__require('5a');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var SyntheticEvent = $__require('5c');
   var CompositionEventInterface = {data: null};
   function SyntheticCompositionEvent(dispatchConfig, dispatchMarker, nativeEvent, nativeEventTarget) {
     SyntheticEvent.call(this, dispatchConfig, dispatchMarker, nativeEvent, nativeEventTarget);
   }
   SyntheticEvent.augmentClass(SyntheticCompositionEvent, CompositionEventInterface);
   module.exports = SyntheticCompositionEvent;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("5b", ["5a"], true, function($__require, exports, module) {
+$__System.registerDynamic("5d", ["5c"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var SyntheticEvent = $__require('5a');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var SyntheticEvent = $__require('5c');
   var InputEventInterface = {data: null};
   function SyntheticInputEvent(dispatchConfig, dispatchMarker, nativeEvent, nativeEventTarget) {
     SyntheticEvent.call(this, dispatchConfig, dispatchMarker, nativeEvent, nativeEventTarget);
   }
   SyntheticEvent.augmentClass(SyntheticInputEvent, InputEventInterface);
   module.exports = SyntheticInputEvent;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("5c", ["5d", "5e", "54", "55", "59", "5b", "5f"], true, function($__require, exports, module) {
+$__System.registerDynamic("5e", ["5f", "60", "56", "57", "5b", "5d", "61"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var EventConstants = $__require('5d');
-  var EventPropagators = $__require('5e');
-  var ExecutionEnvironment = $__require('54');
-  var FallbackCompositionState = $__require('55');
-  var SyntheticCompositionEvent = $__require('59');
-  var SyntheticInputEvent = $__require('5b');
-  var keyOf = $__require('5f');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var EventConstants = $__require('5f');
+  var EventPropagators = $__require('60');
+  var ExecutionEnvironment = $__require('56');
+  var FallbackCompositionState = $__require('57');
+  var SyntheticCompositionEvent = $__require('5b');
+  var SyntheticInputEvent = $__require('5d');
+  var keyOf = $__require('61');
   var END_KEYCODES = [9, 13, 27, 32];
   var START_KEYCODE = 229;
   var canUseCompositionEvent = ExecutionEnvironment.canUseDOM && 'CompositionEvent' in window;
@@ -3226,27 +2713,26 @@ $__System.registerDynamic("5c", ["5d", "5e", "54", "55", "59", "5b", "5f"], true
     }
   };
   module.exports = BeforeInputEventPlugin;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("60", ["5d", "61", "5e", "54", "50", "5a", "62", "63", "64", "5f", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("62", ["5f", "63", "60", "56", "51", "5c", "64", "65", "66", "61", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var EventConstants = $__require('5d');
-    var EventPluginHub = $__require('61');
-    var EventPropagators = $__require('5e');
-    var ExecutionEnvironment = $__require('54');
-    var ReactUpdates = $__require('50');
-    var SyntheticEvent = $__require('5a');
-    var getEventTarget = $__require('62');
-    var isEventSupported = $__require('63');
-    var isTextInputElement = $__require('64');
-    var keyOf = $__require('5f');
+    var EventConstants = $__require('5f');
+    var EventPluginHub = $__require('63');
+    var EventPropagators = $__require('60');
+    var ExecutionEnvironment = $__require('56');
+    var ReactUpdates = $__require('51');
+    var SyntheticEvent = $__require('5c');
+    var getEventTarget = $__require('64');
+    var isEventSupported = $__require('65');
+    var isTextInputElement = $__require('66');
+    var keyOf = $__require('61');
     var topLevelTypes = EventConstants.topLevelTypes;
     var eventTypes = {change: {
         phasedRegistrationNames: {
@@ -3410,50 +2896,47 @@ $__System.registerDynamic("60", ["5d", "61", "5e", "54", "50", "5a", "62", "63",
       }
     };
     module.exports = ChangeEventPlugin;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("65", [], true, function($__require, exports, module) {
+$__System.registerDynamic("67", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var nextReactRootIndex = 0;
   var ClientReactRootIndex = {createReactRootIndex: function() {
       return nextReactRootIndex++;
     }};
   module.exports = ClientReactRootIndex;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("66", ["5f"], true, function($__require, exports, module) {
+$__System.registerDynamic("68", ["61"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var keyOf = $__require('5f');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var keyOf = $__require('61');
   var DefaultEventPluginOrder = [keyOf({ResponderEventPlugin: null}), keyOf({SimpleEventPlugin: null}), keyOf({TapEventPlugin: null}), keyOf({EnterLeaveEventPlugin: null}), keyOf({ChangeEventPlugin: null}), keyOf({SelectEventPlugin: null}), keyOf({BeforeInputEventPlugin: null})];
   module.exports = DefaultEventPluginOrder;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("67", ["5d", "5e", "68", "48", "5f"], true, function($__require, exports, module) {
+$__System.registerDynamic("69", ["5f", "60", "6a", "4a", "61"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var EventConstants = $__require('5d');
-  var EventPropagators = $__require('5e');
-  var SyntheticMouseEvent = $__require('68');
-  var ReactMount = $__require('48');
-  var keyOf = $__require('5f');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var EventConstants = $__require('5f');
+  var EventPropagators = $__require('60');
+  var SyntheticMouseEvent = $__require('6a');
+  var ReactMount = $__require('4a');
+  var keyOf = $__require('61');
   var topLevelTypes = EventConstants.topLevelTypes;
   var getFirstReactDOM = ReactMount.getFirstReactDOM;
   var eventTypes = {
@@ -3524,18 +3007,17 @@ $__System.registerDynamic("67", ["5d", "5e", "68", "48", "5f"], true, function($
     }
   };
   module.exports = EnterLeaveEventPlugin;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("69", ["6a", "54"], true, function($__require, exports, module) {
+$__System.registerDynamic("6b", ["6c", "56"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var DOMProperty = $__require('6a');
-  var ExecutionEnvironment = $__require('54');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var DOMProperty = $__require('6c');
+  var ExecutionEnvironment = $__require('56');
   var MUST_USE_ATTRIBUTE = DOMProperty.injection.MUST_USE_ATTRIBUTE;
   var MUST_USE_PROPERTY = DOMProperty.injection.MUST_USE_PROPERTY;
   var HAS_BOOLEAN_VALUE = DOMProperty.injection.HAS_BOOLEAN_VALUE;
@@ -3712,49 +3194,47 @@ $__System.registerDynamic("69", ["6a", "54"], true, function($__require, exports
     }
   };
   module.exports = HTMLDOMPropertyConfig;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("6b", ["6c", "52", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("6d", ["6e", "53", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactInstanceMap = $__require('6c');
-    var findDOMNode = $__require('52');
-    var warning = $__require('53');
+    var ReactInstanceMap = $__require('6e');
+    var findDOMNode = $__require('53');
+    var warning = $__require('55');
     var didWarnKey = '_getDOMNodeDidWarn';
     var ReactBrowserComponentMixin = {getDOMNode: function() {
-        process.env.NODE_ENV !== 'production' ? warning(this.constructor[didWarnKey], '%s.getDOMNode(...) is deprecated. Please use ' + 'ReactDOM.findDOMNode(instance) instead.', ReactInstanceMap.get(this).getName() || this.tagName || 'Unknown') : undefined;
+        "production" !== 'production' ? warning(this.constructor[didWarnKey], '%s.getDOMNode(...) is deprecated. Please use ' + 'ReactDOM.findDOMNode(instance) instead.', ReactInstanceMap.get(this).getName() || this.tagName || 'Unknown') : undefined;
         this.constructor[didWarnKey] = true;
         return findDOMNode(this);
       }};
     module.exports = ReactBrowserComponentMixin;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("52", ["4a", "6c", "48", "6d", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("53", ["4b", "6e", "4a", "6f", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactCurrentOwner = $__require('4a');
-    var ReactInstanceMap = $__require('6c');
-    var ReactMount = $__require('48');
-    var invariant = $__require('6d');
-    var warning = $__require('53');
+    var ReactCurrentOwner = $__require('4b');
+    var ReactInstanceMap = $__require('6e');
+    var ReactMount = $__require('4a');
+    var invariant = $__require('6f');
+    var warning = $__require('55');
     function findDOMNode(componentOrElement) {
-      if (process.env.NODE_ENV !== 'production') {
+      if ("production" !== 'production') {
         var owner = ReactCurrentOwner.current;
         if (owner !== null) {
-          process.env.NODE_ENV !== 'production' ? warning(owner._warnedAboutRefsInRender, '%s is accessing getDOMNode or findDOMNode inside its render(). ' + 'render() should be a pure function of props and state. It should ' + 'never access something that requires stale data from the previous ' + 'render, such as refs. Move this logic to componentDidMount and ' + 'componentDidUpdate instead.', owner.getName() || 'A component') : undefined;
+          "production" !== 'production' ? warning(owner._warnedAboutRefsInRender, '%s is accessing getDOMNode or findDOMNode inside its render(). ' + 'render() should be a pure function of props and state. It should ' + 'never access something that requires stale data from the previous ' + 'render, such as refs. Move this logic to componentDidMount and ' + 'componentDidUpdate instead.', owner.getName() || 'A component') : undefined;
           owner._warnedAboutRefsInRender = true;
         }
       }
@@ -3767,24 +3247,23 @@ $__System.registerDynamic("52", ["4a", "6c", "48", "6d", "53", "49"], true, func
       if (ReactInstanceMap.has(componentOrElement)) {
         return ReactMount.getNodeFromInstance(componentOrElement);
       }
-      !(componentOrElement.render == null || typeof componentOrElement.render !== 'function') ? process.env.NODE_ENV !== 'production' ? invariant(false, 'findDOMNode was called on an unmounted component.') : invariant(false) : undefined;
-      !false ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Element appears to be neither ReactComponent nor DOMNode (keys: %s)', Object.keys(componentOrElement)) : invariant(false) : undefined;
+      !(componentOrElement.render == null || typeof componentOrElement.render !== 'function') ? "production" !== 'production' ? invariant(false, 'findDOMNode was called on an unmounted component.') : invariant(false) : undefined;
+      !false ? "production" !== 'production' ? invariant(false, 'Element appears to be neither ReactComponent nor DOMNode (keys: %s)', Object.keys(componentOrElement)) : invariant(false) : undefined;
     }
     module.exports = findDOMNode;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("6e", ["48", "52", "6f"], true, function($__require, exports, module) {
+$__System.registerDynamic("70", ["4a", "53", "71"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var ReactMount = $__require('48');
-  var findDOMNode = $__require('52');
-  var focusNode = $__require('6f');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var ReactMount = $__require('4a');
+  var findDOMNode = $__require('53');
+  var focusNode = $__require('71');
   var Mixin = {componentDidMount: function() {
       if (this.props.autoFocus) {
         focusNode(findDOMNode(this));
@@ -3797,16 +3276,15 @@ $__System.registerDynamic("6e", ["48", "52", "6f"], true, function($__require, e
     }
   };
   module.exports = AutoFocusUtils;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("70", [], true, function($__require, exports, module) {
+$__System.registerDynamic("72", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var _hyphenPattern = /-(.)/g;
   function camelize(string) {
     return string.replace(_hyphenPattern, function(_, character) {
@@ -3814,32 +3292,30 @@ $__System.registerDynamic("70", [], true, function($__require, exports, module) 
     });
   }
   module.exports = camelize;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("71", ["70"], true, function($__require, exports, module) {
+$__System.registerDynamic("73", ["72"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var camelize = $__require('70');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var camelize = $__require('72');
   var msPattern = /^-ms-/;
   function camelizeStyleName(string) {
     return camelize(string.replace(msPattern, 'ms-'));
   }
   module.exports = camelizeStyleName;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("72", [], true, function($__require, exports, module) {
+$__System.registerDynamic("74", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var isUnitlessNumber = {
     animationIterationCount: true,
     boxFlex: true,
@@ -3934,17 +3410,16 @@ $__System.registerDynamic("72", [], true, function($__require, exports, module) 
     shorthandPropertyExpansions: shorthandPropertyExpansions
   };
   module.exports = CSSProperty;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("73", ["72"], true, function($__require, exports, module) {
+$__System.registerDynamic("75", ["74"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var CSSProperty = $__require('72');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var CSSProperty = $__require('74');
   var isUnitlessNumber = CSSProperty.isUnitlessNumber;
   function dangerousStyleValue(name, value) {
     var isEmpty = value == null || typeof value === 'boolean' || value === '';
@@ -3961,47 +3436,44 @@ $__System.registerDynamic("73", ["72"], true, function($__require, exports, modu
     return value + 'px';
   }
   module.exports = dangerousStyleValue;
-  global.define = __define;
-  return module.exports;
-});
-
-$__System.registerDynamic("74", [], true, function($__require, exports, module) {
-  "use strict";
-  ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var _uppercasePattern = /([A-Z])/g;
-  function hyphenate(string) {
-    return string.replace(_uppercasePattern, '-$1').toLowerCase();
-  }
-  module.exports = hyphenate;
-  global.define = __define;
-  return module.exports;
-});
-
-$__System.registerDynamic("75", ["74"], true, function($__require, exports, module) {
-  "use strict";
-  ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var hyphenate = $__require('74');
-  var msPattern = /^ms-/;
-  function hyphenateStyleName(string) {
-    return hyphenate(string).replace(msPattern, '-ms-');
-  }
-  module.exports = hyphenateStyleName;
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("76", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
+  var _uppercasePattern = /([A-Z])/g;
+  function hyphenate(string) {
+    return string.replace(_uppercasePattern, '-$1').toLowerCase();
+  }
+  module.exports = hyphenate;
+  return module.exports;
+});
+
+$__System.registerDynamic("77", ["76"], true, function($__require, exports, module) {
+  "use strict";
+  ;
+  var define,
+      global = this,
+      GLOBAL = this;
+  var hyphenate = $__require('76');
+  var msPattern = /^ms-/;
+  function hyphenateStyleName(string) {
+    return hyphenate(string).replace(msPattern, '-ms-');
+  }
+  module.exports = hyphenateStyleName;
+  return module.exports;
+});
+
+$__System.registerDynamic("78", [], true, function($__require, exports, module) {
+  "use strict";
+  ;
+  var define,
+      global = this,
+      GLOBAL = this;
   function memoizeStringOnly(callback) {
     var cache = {};
     return function(string) {
@@ -4012,25 +3484,24 @@ $__System.registerDynamic("76", [], true, function($__require, exports, module) 
     };
   }
   module.exports = memoizeStringOnly;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("77", ["72", "54", "4e", "71", "73", "75", "76", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("79", ["74", "56", "4f", "73", "75", "77", "78", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var CSSProperty = $__require('72');
-    var ExecutionEnvironment = $__require('54');
-    var ReactPerf = $__require('4e');
-    var camelizeStyleName = $__require('71');
-    var dangerousStyleValue = $__require('73');
-    var hyphenateStyleName = $__require('75');
-    var memoizeStringOnly = $__require('76');
-    var warning = $__require('53');
+    var CSSProperty = $__require('74');
+    var ExecutionEnvironment = $__require('56');
+    var ReactPerf = $__require('4f');
+    var camelizeStyleName = $__require('73');
+    var dangerousStyleValue = $__require('75');
+    var hyphenateStyleName = $__require('77');
+    var memoizeStringOnly = $__require('78');
+    var warning = $__require('55');
     var processStyleName = memoizeStringOnly(function(styleName) {
       return hyphenateStyleName(styleName);
     });
@@ -4047,7 +3518,7 @@ $__System.registerDynamic("77", ["72", "54", "4e", "71", "73", "75", "76", "53",
         styleFloatAccessor = 'styleFloat';
       }
     }
-    if (process.env.NODE_ENV !== 'production') {
+    if ("production" !== 'production') {
       var badVendoredStyleNamePattern = /^(?:webkit|moz|o)[A-Z]/;
       var badStyleValueWithSemicolonPattern = /;\s*$/;
       var warnedStyleNames = {};
@@ -4057,21 +3528,21 @@ $__System.registerDynamic("77", ["72", "54", "4e", "71", "73", "75", "76", "53",
           return;
         }
         warnedStyleNames[name] = true;
-        process.env.NODE_ENV !== 'production' ? warning(false, 'Unsupported style property %s. Did you mean %s?', name, camelizeStyleName(name)) : undefined;
+        "production" !== 'production' ? warning(false, 'Unsupported style property %s. Did you mean %s?', name, camelizeStyleName(name)) : undefined;
       };
       var warnBadVendoredStyleName = function(name) {
         if (warnedStyleNames.hasOwnProperty(name) && warnedStyleNames[name]) {
           return;
         }
         warnedStyleNames[name] = true;
-        process.env.NODE_ENV !== 'production' ? warning(false, 'Unsupported vendor-prefixed style property %s. Did you mean %s?', name, name.charAt(0).toUpperCase() + name.slice(1)) : undefined;
+        "production" !== 'production' ? warning(false, 'Unsupported vendor-prefixed style property %s. Did you mean %s?', name, name.charAt(0).toUpperCase() + name.slice(1)) : undefined;
       };
       var warnStyleValueWithSemicolon = function(name, value) {
         if (warnedStyleValues.hasOwnProperty(value) && warnedStyleValues[value]) {
           return;
         }
         warnedStyleValues[value] = true;
-        process.env.NODE_ENV !== 'production' ? warning(false, 'Style property values shouldn\'t contain a semicolon. ' + 'Try "%s: %s" instead.', name, value.replace(badStyleValueWithSemicolonPattern, '')) : undefined;
+        "production" !== 'production' ? warning(false, 'Style property values shouldn\'t contain a semicolon. ' + 'Try "%s: %s" instead.', name, value.replace(badStyleValueWithSemicolonPattern, '')) : undefined;
       };
       var warnValidStyle = function(name, value) {
         if (name.indexOf('-') > -1) {
@@ -4091,7 +3562,7 @@ $__System.registerDynamic("77", ["72", "54", "4e", "71", "73", "75", "76", "53",
             continue;
           }
           var styleValue = styles[styleName];
-          if (process.env.NODE_ENV !== 'production') {
+          if ("production" !== 'production') {
             warnValidStyle(styleName, styleValue);
           }
           if (styleValue != null) {
@@ -4107,7 +3578,7 @@ $__System.registerDynamic("77", ["72", "54", "4e", "71", "73", "75", "76", "53",
           if (!styles.hasOwnProperty(styleName)) {
             continue;
           }
-          if (process.env.NODE_ENV !== 'production') {
+          if ("production" !== 'production') {
             warnValidStyle(styleName, styles[styleName]);
           }
           var styleValue = dangerousStyleValue(styleName, styles[styleName]);
@@ -4131,17 +3602,16 @@ $__System.registerDynamic("77", ["72", "54", "4e", "71", "73", "75", "76", "53",
     };
     ReactPerf.measureMethods(CSSPropertyOperations, 'CSSPropertyOperations', {setValueForStyles: 'setValueForStyles'});
     module.exports = CSSPropertyOperations;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("78", [], true, function($__require, exports, module) {
+$__System.registerDynamic("7a", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var mouseListenerNames = {
     onClick: true,
     onDoubleClick: true,
@@ -4167,23 +3637,22 @@ $__System.registerDynamic("78", [], true, function($__require, exports, module) 
       return nativeProps;
     }};
   module.exports = ReactDOMButton;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("79", ["7a", "7b", "48", "50", "57", "6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("7b", ["7c", "7d", "4a", "51", "59", "6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactDOMIDOperations = $__require('7a');
-    var LinkedValueUtils = $__require('7b');
-    var ReactMount = $__require('48');
-    var ReactUpdates = $__require('50');
-    var assign = $__require('57');
-    var invariant = $__require('6d');
+    var ReactDOMIDOperations = $__require('7c');
+    var LinkedValueUtils = $__require('7d');
+    var ReactMount = $__require('4a');
+    var ReactUpdates = $__require('51');
+    var assign = $__require('59');
+    var invariant = $__require('6f');
     var instancesByReactID = {};
     function forceUpdateIfMounted() {
       if (this._rootNodeID) {
@@ -4204,7 +3673,7 @@ $__System.registerDynamic("79", ["7a", "7b", "48", "50", "57", "6d", "49"], true
         return nativeProps;
       },
       mountWrapper: function(inst, props) {
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           LinkedValueUtils.checkPropTypes('input', props, inst._currentElement._owner);
         }
         var defaultValue = props.defaultValue;
@@ -4250,36 +3719,35 @@ $__System.registerDynamic("79", ["7a", "7b", "48", "50", "57", "6d", "49"], true
             continue;
           }
           var otherID = ReactMount.getID(otherNode);
-          !otherID ? process.env.NODE_ENV !== 'production' ? invariant(false, 'ReactDOMInput: Mixing React and non-React radio inputs with the ' + 'same `name` is not supported.') : invariant(false) : undefined;
+          !otherID ? "production" !== 'production' ? invariant(false, 'ReactDOMInput: Mixing React and non-React radio inputs with the ' + 'same `name` is not supported.') : invariant(false) : undefined;
           var otherInstance = instancesByReactID[otherID];
-          !otherInstance ? process.env.NODE_ENV !== 'production' ? invariant(false, 'ReactDOMInput: Unknown radio button ID %s.', otherID) : invariant(false) : undefined;
+          !otherInstance ? "production" !== 'production' ? invariant(false, 'ReactDOMInput: Unknown radio button ID %s.', otherID) : invariant(false) : undefined;
           ReactUpdates.asap(forceUpdateIfMounted, otherInstance);
         }
       }
       return returnValue;
     }
     module.exports = ReactDOMInput;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("7c", ["7d", "7e", "57", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("7e", ["7f", "80", "59", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactChildren = $__require('7d');
-    var ReactDOMSelect = $__require('7e');
-    var assign = $__require('57');
-    var warning = $__require('53');
+    var ReactChildren = $__require('7f');
+    var ReactDOMSelect = $__require('80');
+    var assign = $__require('59');
+    var warning = $__require('55');
     var valueContextKey = ReactDOMSelect.valueContextKey;
     var ReactDOMOption = {
       mountWrapper: function(inst, props, context) {
-        if (process.env.NODE_ENV !== 'production') {
-          process.env.NODE_ENV !== 'production' ? warning(props.selected == null, 'Use the `defaultValue` or `value` props on <select> instead of ' + 'setting `selected` on <option>.') : undefined;
+        if ("production" !== 'production') {
+          "production" !== 'production' ? warning(props.selected == null, 'Use the `defaultValue` or `value` props on <select> instead of ' + 'setting `selected` on <option>.') : undefined;
         }
         var selectValue = context[valueContextKey];
         var selected = null;
@@ -4314,7 +3782,7 @@ $__System.registerDynamic("7c", ["7d", "7e", "57", "53", "49"], true, function($
           if (typeof child === 'string' || typeof child === 'number') {
             content += child;
           } else {
-            process.env.NODE_ENV !== 'production' ? warning(false, 'Only strings and numbers are supported as <option> children.') : undefined;
+            "production" !== 'production' ? warning(false, 'Only strings and numbers are supported as <option> children.') : undefined;
           }
         });
         nativeProps.children = content;
@@ -4322,23 +3790,22 @@ $__System.registerDynamic("7c", ["7d", "7e", "57", "53", "49"], true, function($
       }
     };
     module.exports = ReactDOMOption;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("7e", ["7b", "48", "50", "57", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("80", ["7d", "4a", "51", "59", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var LinkedValueUtils = $__require('7b');
-    var ReactMount = $__require('48');
-    var ReactUpdates = $__require('50');
-    var assign = $__require('57');
-    var warning = $__require('53');
+    var LinkedValueUtils = $__require('7d');
+    var ReactMount = $__require('4a');
+    var ReactUpdates = $__require('51');
+    var assign = $__require('59');
+    var warning = $__require('55');
     var valueContextKey = '__ReactDOMSelect_value$' + Math.random().toString(36).slice(2);
     function updateOptionsIfPendingUpdateAndMounted() {
       if (this._rootNodeID && this._wrapperState.pendingUpdate) {
@@ -4369,9 +3836,9 @@ $__System.registerDynamic("7e", ["7b", "48", "50", "57", "53", "49"], true, func
           continue;
         }
         if (props.multiple) {
-          process.env.NODE_ENV !== 'production' ? warning(Array.isArray(props[propName]), 'The `%s` prop supplied to <select> must be an array if ' + '`multiple` is true.%s', propName, getDeclarationErrorAddendum(owner)) : undefined;
+          "production" !== 'production' ? warning(Array.isArray(props[propName]), 'The `%s` prop supplied to <select> must be an array if ' + '`multiple` is true.%s', propName, getDeclarationErrorAddendum(owner)) : undefined;
         } else {
-          process.env.NODE_ENV !== 'production' ? warning(!Array.isArray(props[propName]), 'The `%s` prop supplied to <select> must be a scalar ' + 'value if `multiple` is false.%s', propName, getDeclarationErrorAddendum(owner)) : undefined;
+          "production" !== 'production' ? warning(!Array.isArray(props[propName]), 'The `%s` prop supplied to <select> must be a scalar ' + 'value if `multiple` is false.%s', propName, getDeclarationErrorAddendum(owner)) : undefined;
         }
       }
     }
@@ -4412,7 +3879,7 @@ $__System.registerDynamic("7e", ["7b", "48", "50", "57", "53", "49"], true, func
         });
       },
       mountWrapper: function(inst, props) {
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           checkSelectPropTypes(inst, props);
         }
         var value = LinkedValueUtils.getValue(props);
@@ -4454,22 +3921,21 @@ $__System.registerDynamic("7e", ["7b", "48", "50", "57", "53", "49"], true, func
       return returnValue;
     }
     module.exports = ReactDOMSelect;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("7b", ["7f", "80", "6d", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("7d", ["81", "82", "6f", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactPropTypes = $__require('7f');
-    var ReactPropTypeLocations = $__require('80');
-    var invariant = $__require('6d');
-    var warning = $__require('53');
+    var ReactPropTypes = $__require('81');
+    var ReactPropTypeLocations = $__require('82');
+    var invariant = $__require('6f');
+    var warning = $__require('55');
     var hasReadOnlyValue = {
       'button': true,
       'checkbox': true,
@@ -4480,15 +3946,15 @@ $__System.registerDynamic("7b", ["7f", "80", "6d", "53", "49"], true, function($
       'submit': true
     };
     function _assertSingleLink(inputProps) {
-      !(inputProps.checkedLink == null || inputProps.valueLink == null) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Cannot provide a checkedLink and a valueLink. If you want to use ' + 'checkedLink, you probably don\'t want to use valueLink and vice versa.') : invariant(false) : undefined;
+      !(inputProps.checkedLink == null || inputProps.valueLink == null) ? "production" !== 'production' ? invariant(false, 'Cannot provide a checkedLink and a valueLink. If you want to use ' + 'checkedLink, you probably don\'t want to use valueLink and vice versa.') : invariant(false) : undefined;
     }
     function _assertValueLink(inputProps) {
       _assertSingleLink(inputProps);
-      !(inputProps.value == null && inputProps.onChange == null) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Cannot provide a valueLink and a value or onChange event. If you want ' + 'to use value or onChange, you probably don\'t want to use valueLink.') : invariant(false) : undefined;
+      !(inputProps.value == null && inputProps.onChange == null) ? "production" !== 'production' ? invariant(false, 'Cannot provide a valueLink and a value or onChange event. If you want ' + 'to use value or onChange, you probably don\'t want to use valueLink.') : invariant(false) : undefined;
     }
     function _assertCheckedLink(inputProps) {
       _assertSingleLink(inputProps);
-      !(inputProps.checked == null && inputProps.onChange == null) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Cannot provide a checkedLink and a checked property or onChange event. ' + 'If you want to use checked or onChange, you probably don\'t want to ' + 'use checkedLink') : invariant(false) : undefined;
+      !(inputProps.checked == null && inputProps.onChange == null) ? "production" !== 'production' ? invariant(false, 'Cannot provide a checkedLink and a checked property or onChange event. ' + 'If you want to use checked or onChange, you probably don\'t want to ' + 'use checkedLink') : invariant(false) : undefined;
     }
     var propTypes = {
       value: function(props, propName, componentName) {
@@ -4524,7 +3990,7 @@ $__System.registerDynamic("7b", ["7f", "80", "6d", "53", "49"], true, function($
           if (error instanceof Error && !(error.message in loggedTypeFailures)) {
             loggedTypeFailures[error.message] = true;
             var addendum = getDeclarationErrorAddendum(owner);
-            process.env.NODE_ENV !== 'production' ? warning(false, 'Failed form propType: %s%s', error.message, addendum) : undefined;
+            "production" !== 'production' ? warning(false, 'Failed form propType: %s%s', error.message, addendum) : undefined;
           }
         }
       },
@@ -4555,24 +4021,23 @@ $__System.registerDynamic("7b", ["7f", "80", "6d", "53", "49"], true, function($
       }
     };
     module.exports = LinkedValueUtils;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("81", ["7b", "7a", "50", "57", "6d", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("83", ["7d", "7c", "51", "59", "6f", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var LinkedValueUtils = $__require('7b');
-    var ReactDOMIDOperations = $__require('7a');
-    var ReactUpdates = $__require('50');
-    var assign = $__require('57');
-    var invariant = $__require('6d');
-    var warning = $__require('53');
+    var LinkedValueUtils = $__require('7d');
+    var ReactDOMIDOperations = $__require('7c');
+    var ReactUpdates = $__require('51');
+    var assign = $__require('59');
+    var invariant = $__require('6f');
+    var warning = $__require('55');
     function forceUpdateIfMounted() {
       if (this._rootNodeID) {
         ReactDOMTextarea.updateWrapper(this);
@@ -4580,7 +4045,7 @@ $__System.registerDynamic("81", ["7b", "7a", "50", "57", "6d", "53", "49"], true
     }
     var ReactDOMTextarea = {
       getNativeProps: function(inst, props, context) {
-        !(props.dangerouslySetInnerHTML == null) ? process.env.NODE_ENV !== 'production' ? invariant(false, '`dangerouslySetInnerHTML` does not make sense on <textarea>.') : invariant(false) : undefined;
+        !(props.dangerouslySetInnerHTML == null) ? "production" !== 'production' ? invariant(false, '`dangerouslySetInnerHTML` does not make sense on <textarea>.') : invariant(false) : undefined;
         var nativeProps = assign({}, props, {
           defaultValue: undefined,
           value: undefined,
@@ -4590,18 +4055,18 @@ $__System.registerDynamic("81", ["7b", "7a", "50", "57", "6d", "53", "49"], true
         return nativeProps;
       },
       mountWrapper: function(inst, props) {
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           LinkedValueUtils.checkPropTypes('textarea', props, inst._currentElement._owner);
         }
         var defaultValue = props.defaultValue;
         var children = props.children;
         if (children != null) {
-          if (process.env.NODE_ENV !== 'production') {
-            process.env.NODE_ENV !== 'production' ? warning(false, 'Use the `defaultValue` or `value` props instead of setting ' + 'children on <textarea>.') : undefined;
+          if ("production" !== 'production') {
+            "production" !== 'production' ? warning(false, 'Use the `defaultValue` or `value` props instead of setting ' + 'children on <textarea>.') : undefined;
           }
-          !(defaultValue == null) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'If you supply `defaultValue` on a <textarea>, do not pass children.') : invariant(false) : undefined;
+          !(defaultValue == null) ? "production" !== 'production' ? invariant(false, 'If you supply `defaultValue` on a <textarea>, do not pass children.') : invariant(false) : undefined;
           if (Array.isArray(children)) {
-            !(children.length <= 1) ? process.env.NODE_ENV !== 'production' ? invariant(false, '<textarea> can only have at most one child.') : invariant(false) : undefined;
+            !(children.length <= 1) ? "production" !== 'production' ? invariant(false, '<textarea> can only have at most one child.') : invariant(false) : undefined;
             children = children[0];
           }
           defaultValue = '' + children;
@@ -4630,27 +4095,26 @@ $__System.registerDynamic("81", ["7b", "7a", "50", "57", "6d", "53", "49"], true
       return returnValue;
     }
     module.exports = ReactDOMTextarea;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("82", ["4f", "83", "84", "85", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("84", ["50", "85", "86", "87", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactReconciler = $__require('4f');
-    var instantiateReactComponent = $__require('83');
-    var shouldUpdateReactComponent = $__require('84');
-    var traverseAllChildren = $__require('85');
-    var warning = $__require('53');
+    var ReactReconciler = $__require('50');
+    var instantiateReactComponent = $__require('85');
+    var shouldUpdateReactComponent = $__require('86');
+    var traverseAllChildren = $__require('87');
+    var warning = $__require('55');
     function instantiateChild(childInstances, child, name) {
       var keyUnique = childInstances[name] === undefined;
-      if (process.env.NODE_ENV !== 'production') {
-        process.env.NODE_ENV !== 'production' ? warning(keyUnique, 'flattenChildren(...): Encountered two children with the same key, ' + '`%s`. Child keys must be unique; when two children share a key, only ' + 'the first child will be used.', name) : undefined;
+      if ("production" !== 'production') {
+        "production" !== 'production' ? warning(keyUnique, 'flattenChildren(...): Encountered two children with the same key, ' + '`%s`. Child keys must be unique; when two children share a key, only ' + 'the first child will be used.', name) : undefined;
       }
       if (child != null && keyUnique) {
         childInstances[name] = instantiateReactComponent(child, null);
@@ -4705,25 +4169,24 @@ $__System.registerDynamic("82", ["4f", "83", "84", "85", "53", "49"], true, func
       }
     };
     module.exports = ReactChildReconciler;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("86", ["85", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("88", ["87", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var traverseAllChildren = $__require('85');
-    var warning = $__require('53');
+    var traverseAllChildren = $__require('87');
+    var warning = $__require('55');
     function flattenSingleChildIntoContext(traverseContext, child, name) {
       var result = traverseContext;
       var keyUnique = result[name] === undefined;
-      if (process.env.NODE_ENV !== 'production') {
-        process.env.NODE_ENV !== 'production' ? warning(keyUnique, 'flattenChildren(...): Encountered two children with the same key, ' + '`%s`. Child keys must be unique; when two children share a key, only ' + 'the first child will be used.', name) : undefined;
+      if ("production" !== 'production') {
+        "production" !== 'production' ? warning(keyUnique, 'flattenChildren(...): Encountered two children with the same key, ' + '`%s`. Child keys must be unique; when two children share a key, only ' + 'the first child will be used.', name) : undefined;
       }
       if (keyUnique && child != null) {
         result[name] = child;
@@ -4738,24 +4201,23 @@ $__System.registerDynamic("86", ["85", "53", "49"], true, function($__require, e
       return result;
     }
     module.exports = flattenChildren;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("87", ["88", "89", "4a", "4f", "82", "86", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("89", ["8a", "8b", "4b", "50", "84", "88", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactComponentEnvironment = $__require('88');
-    var ReactMultiChildUpdateTypes = $__require('89');
-    var ReactCurrentOwner = $__require('4a');
-    var ReactReconciler = $__require('4f');
-    var ReactChildReconciler = $__require('82');
-    var flattenChildren = $__require('86');
+    var ReactComponentEnvironment = $__require('8a');
+    var ReactMultiChildUpdateTypes = $__require('8b');
+    var ReactCurrentOwner = $__require('4b');
+    var ReactReconciler = $__require('50');
+    var ReactChildReconciler = $__require('84');
+    var flattenChildren = $__require('88');
     var updateDepth = 0;
     var updateQueue = [];
     var markupQueue = [];
@@ -4826,7 +4288,7 @@ $__System.registerDynamic("87", ["88", "89", "4a", "4f", "82", "86", "49"], true
     }
     var ReactMultiChild = {Mixin: {
         _reconcilerInstantiateChildren: function(nestedChildren, transaction, context) {
-          if (process.env.NODE_ENV !== 'production') {
+          if ("production" !== 'production') {
             if (this._currentElement) {
               try {
                 ReactCurrentOwner.current = this._currentElement._owner;
@@ -4840,7 +4302,7 @@ $__System.registerDynamic("87", ["88", "89", "4a", "4f", "82", "86", "49"], true
         },
         _reconcilerUpdateChildren: function(prevChildren, nextNestedChildrenElements, transaction, context) {
           var nextChildren;
-          if (process.env.NODE_ENV !== 'production') {
+          if ("production" !== 'production') {
             if (this._currentElement) {
               try {
                 ReactCurrentOwner.current = this._currentElement._owner;
@@ -5004,45 +4466,44 @@ $__System.registerDynamic("87", ["88", "89", "4a", "4f", "82", "86", "49"], true
         }
       }};
     module.exports = ReactMultiChild;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("8a", ["6e", "77", "6a", "8b", "5d", "8c", "8d", "78", "79", "7c", "7e", "81", "48", "87", "4e", "8e", "57", "8f", "90", "6d", "63", "5f", "91", "92", "93", "94", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("8c", ["70", "79", "6c", "8d", "5f", "8e", "8f", "7a", "7b", "7e", "80", "83", "4a", "89", "4f", "90", "59", "91", "92", "6f", "65", "61", "93", "94", "96", "95", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var AutoFocusUtils = $__require('6e');
-    var CSSPropertyOperations = $__require('77');
-    var DOMProperty = $__require('6a');
-    var DOMPropertyOperations = $__require('8b');
-    var EventConstants = $__require('5d');
-    var ReactBrowserEventEmitter = $__require('8c');
-    var ReactComponentBrowserEnvironment = $__require('8d');
-    var ReactDOMButton = $__require('78');
-    var ReactDOMInput = $__require('79');
-    var ReactDOMOption = $__require('7c');
-    var ReactDOMSelect = $__require('7e');
-    var ReactDOMTextarea = $__require('81');
-    var ReactMount = $__require('48');
-    var ReactMultiChild = $__require('87');
-    var ReactPerf = $__require('4e');
-    var ReactUpdateQueue = $__require('8e');
-    var assign = $__require('57');
-    var canDefineProperty = $__require('8f');
-    var escapeTextContentForBrowser = $__require('90');
-    var invariant = $__require('6d');
-    var isEventSupported = $__require('63');
-    var keyOf = $__require('5f');
-    var setInnerHTML = $__require('91');
-    var setTextContent = $__require('92');
-    var shallowEqual = $__require('93');
-    var validateDOMNesting = $__require('94');
-    var warning = $__require('53');
+    var AutoFocusUtils = $__require('70');
+    var CSSPropertyOperations = $__require('79');
+    var DOMProperty = $__require('6c');
+    var DOMPropertyOperations = $__require('8d');
+    var EventConstants = $__require('5f');
+    var ReactBrowserEventEmitter = $__require('8e');
+    var ReactComponentBrowserEnvironment = $__require('8f');
+    var ReactDOMButton = $__require('7a');
+    var ReactDOMInput = $__require('7b');
+    var ReactDOMOption = $__require('7e');
+    var ReactDOMSelect = $__require('80');
+    var ReactDOMTextarea = $__require('83');
+    var ReactMount = $__require('4a');
+    var ReactMultiChild = $__require('89');
+    var ReactPerf = $__require('4f');
+    var ReactUpdateQueue = $__require('90');
+    var assign = $__require('59');
+    var canDefineProperty = $__require('91');
+    var escapeTextContentForBrowser = $__require('92');
+    var invariant = $__require('6f');
+    var isEventSupported = $__require('65');
+    var keyOf = $__require('61');
+    var setInnerHTML = $__require('93');
+    var setTextContent = $__require('94');
+    var shallowEqual = $__require('96');
+    var validateDOMNesting = $__require('95');
+    var warning = $__require('55');
     var deleteListener = ReactBrowserEventEmitter.deleteListener;
     var listenTo = ReactBrowserEventEmitter.listenTo;
     var registrationNameModules = ReactBrowserEventEmitter.registrationNameModules;
@@ -5067,40 +4528,40 @@ $__System.registerDynamic("8a", ["6e", "77", "6a", "8b", "5d", "8c", "8d", "78",
       return '';
     }
     var legacyPropsDescriptor;
-    if (process.env.NODE_ENV !== 'production') {
+    if ("production" !== 'production') {
       legacyPropsDescriptor = {props: {
           enumerable: false,
           get: function() {
             var component = this._reactInternalComponent;
-            process.env.NODE_ENV !== 'production' ? warning(false, 'ReactDOMComponent: Do not access .props of a DOM node; instead, ' + 'recreate the props as `render` did originally or read the DOM ' + 'properties/attributes directly from this node (e.g., ' + 'this.refs.box.className).%s', getDeclarationErrorAddendum(component)) : undefined;
+            "production" !== 'production' ? warning(false, 'ReactDOMComponent: Do not access .props of a DOM node; instead, ' + 'recreate the props as `render` did originally or read the DOM ' + 'properties/attributes directly from this node (e.g., ' + 'this.refs.box.className).%s', getDeclarationErrorAddendum(component)) : undefined;
             return component._currentElement.props;
           }
         }};
     }
     function legacyGetDOMNode() {
-      if (process.env.NODE_ENV !== 'production') {
+      if ("production" !== 'production') {
         var component = this._reactInternalComponent;
-        process.env.NODE_ENV !== 'production' ? warning(false, 'ReactDOMComponent: Do not access .getDOMNode() of a DOM node; ' + 'instead, use the node directly.%s', getDeclarationErrorAddendum(component)) : undefined;
+        "production" !== 'production' ? warning(false, 'ReactDOMComponent: Do not access .getDOMNode() of a DOM node; ' + 'instead, use the node directly.%s', getDeclarationErrorAddendum(component)) : undefined;
       }
       return this;
     }
     function legacyIsMounted() {
       var component = this._reactInternalComponent;
-      if (process.env.NODE_ENV !== 'production') {
-        process.env.NODE_ENV !== 'production' ? warning(false, 'ReactDOMComponent: Do not access .isMounted() of a DOM node.%s', getDeclarationErrorAddendum(component)) : undefined;
+      if ("production" !== 'production') {
+        "production" !== 'production' ? warning(false, 'ReactDOMComponent: Do not access .isMounted() of a DOM node.%s', getDeclarationErrorAddendum(component)) : undefined;
       }
       return !!component;
     }
     function legacySetStateEtc() {
-      if (process.env.NODE_ENV !== 'production') {
+      if ("production" !== 'production') {
         var component = this._reactInternalComponent;
-        process.env.NODE_ENV !== 'production' ? warning(false, 'ReactDOMComponent: Do not access .setState(), .replaceState(), or ' + '.forceUpdate() of a DOM node. This is a no-op.%s', getDeclarationErrorAddendum(component)) : undefined;
+        "production" !== 'production' ? warning(false, 'ReactDOMComponent: Do not access .setState(), .replaceState(), or ' + '.forceUpdate() of a DOM node. This is a no-op.%s', getDeclarationErrorAddendum(component)) : undefined;
       }
     }
     function legacySetProps(partialProps, callback) {
       var component = this._reactInternalComponent;
-      if (process.env.NODE_ENV !== 'production') {
-        process.env.NODE_ENV !== 'production' ? warning(false, 'ReactDOMComponent: Do not access .setProps() of a DOM node. ' + 'Instead, call ReactDOM.render again at the top level.%s', getDeclarationErrorAddendum(component)) : undefined;
+      if ("production" !== 'production') {
+        "production" !== 'production' ? warning(false, 'ReactDOMComponent: Do not access .setProps() of a DOM node. ' + 'Instead, call ReactDOM.render again at the top level.%s', getDeclarationErrorAddendum(component)) : undefined;
       }
       if (!component) {
         return;
@@ -5112,8 +4573,8 @@ $__System.registerDynamic("8a", ["6e", "77", "6a", "8b", "5d", "8c", "8d", "78",
     }
     function legacyReplaceProps(partialProps, callback) {
       var component = this._reactInternalComponent;
-      if (process.env.NODE_ENV !== 'production') {
-        process.env.NODE_ENV !== 'production' ? warning(false, 'ReactDOMComponent: Do not access .replaceProps() of a DOM node. ' + 'Instead, call ReactDOM.render again at the top level.%s', getDeclarationErrorAddendum(component)) : undefined;
+      if ("production" !== 'production') {
+        "production" !== 'production' ? warning(false, 'ReactDOMComponent: Do not access .replaceProps() of a DOM node. ' + 'Instead, call ReactDOM.render again at the top level.%s', getDeclarationErrorAddendum(component)) : undefined;
       }
       if (!component) {
         return;
@@ -5163,30 +4624,30 @@ $__System.registerDynamic("8a", ["6e", "77", "6a", "8b", "5d", "8c", "8d", "78",
         return;
       }
       styleMutationWarning[hash] = true;
-      process.env.NODE_ENV !== 'production' ? warning(false, '`%s` was passed a style object that has previously been mutated. ' + 'Mutating `style` is deprecated. Consider cloning it beforehand. Check ' + 'the `render` %s. Previous style: %s. Mutated style: %s.', componentName, owner ? 'of `' + ownerName + '`' : 'using <' + componentName + '>', friendlyStringify(style1), friendlyStringify(style2)) : undefined;
+      "production" !== 'production' ? warning(false, '`%s` was passed a style object that has previously been mutated. ' + 'Mutating `style` is deprecated. Consider cloning it beforehand. Check ' + 'the `render` %s. Previous style: %s. Mutated style: %s.', componentName, owner ? 'of `' + ownerName + '`' : 'using <' + componentName + '>', friendlyStringify(style1), friendlyStringify(style2)) : undefined;
     }
     function assertValidProps(component, props) {
       if (!props) {
         return;
       }
-      if (process.env.NODE_ENV !== 'production') {
+      if ("production" !== 'production') {
         if (voidElementTags[component._tag]) {
-          process.env.NODE_ENV !== 'production' ? warning(props.children == null && props.dangerouslySetInnerHTML == null, '%s is a void element tag and must not have `children` or ' + 'use `props.dangerouslySetInnerHTML`.%s', component._tag, component._currentElement._owner ? ' Check the render method of ' + component._currentElement._owner.getName() + '.' : '') : undefined;
+          "production" !== 'production' ? warning(props.children == null && props.dangerouslySetInnerHTML == null, '%s is a void element tag and must not have `children` or ' + 'use `props.dangerouslySetInnerHTML`.%s', component._tag, component._currentElement._owner ? ' Check the render method of ' + component._currentElement._owner.getName() + '.' : '') : undefined;
         }
       }
       if (props.dangerouslySetInnerHTML != null) {
-        !(props.children == null) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Can only set one of `children` or `props.dangerouslySetInnerHTML`.') : invariant(false) : undefined;
-        !(typeof props.dangerouslySetInnerHTML === 'object' && HTML in props.dangerouslySetInnerHTML) ? process.env.NODE_ENV !== 'production' ? invariant(false, '`props.dangerouslySetInnerHTML` must be in the form `{__html: ...}`. ' + 'Please visit https://fb.me/react-invariant-dangerously-set-inner-html ' + 'for more information.') : invariant(false) : undefined;
+        !(props.children == null) ? "production" !== 'production' ? invariant(false, 'Can only set one of `children` or `props.dangerouslySetInnerHTML`.') : invariant(false) : undefined;
+        !(typeof props.dangerouslySetInnerHTML === 'object' && HTML in props.dangerouslySetInnerHTML) ? "production" !== 'production' ? invariant(false, '`props.dangerouslySetInnerHTML` must be in the form `{__html: ...}`. ' + 'Please visit https://fb.me/react-invariant-dangerously-set-inner-html ' + 'for more information.') : invariant(false) : undefined;
       }
-      if (process.env.NODE_ENV !== 'production') {
-        process.env.NODE_ENV !== 'production' ? warning(props.innerHTML == null, 'Directly setting property `innerHTML` is not permitted. ' + 'For more information, lookup documentation on `dangerouslySetInnerHTML`.') : undefined;
-        process.env.NODE_ENV !== 'production' ? warning(!props.contentEditable || props.children == null, 'A component is `contentEditable` and contains `children` managed by ' + 'React. It is now your responsibility to guarantee that none of ' + 'those nodes are unexpectedly modified or duplicated. This is ' + 'probably not intentional.') : undefined;
+      if ("production" !== 'production') {
+        "production" !== 'production' ? warning(props.innerHTML == null, 'Directly setting property `innerHTML` is not permitted. ' + 'For more information, lookup documentation on `dangerouslySetInnerHTML`.') : undefined;
+        "production" !== 'production' ? warning(!props.contentEditable || props.children == null, 'A component is `contentEditable` and contains `children` managed by ' + 'React. It is now your responsibility to guarantee that none of ' + 'those nodes are unexpectedly modified or duplicated. This is ' + 'probably not intentional.') : undefined;
       }
-      !(props.style == null || typeof props.style === 'object') ? process.env.NODE_ENV !== 'production' ? invariant(false, 'The `style` prop expects a mapping from style properties to values, ' + 'not a string. For example, style={{marginRight: spacing + \'em\'}} when ' + 'using JSX.%s', getDeclarationErrorAddendum(component)) : invariant(false) : undefined;
+      !(props.style == null || typeof props.style === 'object') ? "production" !== 'production' ? invariant(false, 'The `style` prop expects a mapping from style properties to values, ' + 'not a string. For example, style={{marginRight: spacing + \'em\'}} when ' + 'using JSX.%s', getDeclarationErrorAddendum(component)) : invariant(false) : undefined;
     }
     function enqueuePutListener(id, registrationName, listener, transaction) {
-      if (process.env.NODE_ENV !== 'production') {
-        process.env.NODE_ENV !== 'production' ? warning(registrationName !== 'onScroll' || isEventSupported('scroll', true), 'This browser doesn\'t support the `onScroll` event') : undefined;
+      if ("production" !== 'production') {
+        "production" !== 'production' ? warning(registrationName !== 'onScroll' || isEventSupported('scroll', true), 'This browser doesn\'t support the `onScroll` event') : undefined;
       }
       var container = ReactMount.findReactContainerForID(id);
       if (container) {
@@ -5230,9 +4691,9 @@ $__System.registerDynamic("8a", ["6e", "77", "6a", "8b", "5d", "8c", "8d", "78",
     };
     function trapBubbledEventsLocal() {
       var inst = this;
-      !inst._rootNodeID ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Must be mounted to trap events') : invariant(false) : undefined;
+      !inst._rootNodeID ? "production" !== 'production' ? invariant(false, 'Must be mounted to trap events') : invariant(false) : undefined;
       var node = ReactMount.getNode(inst._rootNodeID);
-      !node ? process.env.NODE_ENV !== 'production' ? invariant(false, 'trapBubbledEvent(...): Requires node to be rendered.') : invariant(false) : undefined;
+      !node ? "production" !== 'production' ? invariant(false, 'trapBubbledEvent(...): Requires node to be rendered.') : invariant(false) : undefined;
       switch (inst._tag) {
         case 'iframe':
           inst._wrapperState.listeners = [ReactBrowserEventEmitter.trapBubbledEvent(EventConstants.topLevelTypes.topLoad, 'load', node)];
@@ -5288,7 +4749,7 @@ $__System.registerDynamic("8a", ["6e", "77", "6a", "8b", "5d", "8c", "8d", "78",
     var hasOwnProperty = ({}).hasOwnProperty;
     function validateDangerousTag(tag) {
       if (!hasOwnProperty.call(validatedTagCache, tag)) {
-        !VALID_TAG_REGEX.test(tag) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Invalid tag: %s', tag) : invariant(false) : undefined;
+        !VALID_TAG_REGEX.test(tag) ? "production" !== 'production' ? invariant(false, 'Invalid tag: %s', tag) : invariant(false) : undefined;
         validatedTagCache[tag] = true;
       }
     }
@@ -5311,7 +4772,7 @@ $__System.registerDynamic("8a", ["6e", "77", "6a", "8b", "5d", "8c", "8d", "78",
       this._wrapperState = null;
       this._topLevelWrapper = null;
       this._nodeWithLegacyProperties = null;
-      if (process.env.NODE_ENV !== 'production') {
+      if ("production" !== 'production') {
         this._unprocessedContextDev = null;
         this._processedContextDev = null;
       }
@@ -5355,12 +4816,12 @@ $__System.registerDynamic("8a", ["6e", "77", "6a", "8b", "5d", "8c", "8d", "78",
             break;
         }
         assertValidProps(this, props);
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           if (context[validateDOMNesting.ancestorInfoContextKey]) {
             validateDOMNesting(this._tag, this, context[validateDOMNesting.ancestorInfoContextKey]);
           }
         }
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           this._unprocessedContextDev = context;
           this._processedContextDev = processChildContextDev(context, this);
           context = this._processedContextDev;
@@ -5413,7 +4874,7 @@ $__System.registerDynamic("8a", ["6e", "77", "6a", "8b", "5d", "8c", "8d", "78",
           } else {
             if (propKey === STYLE) {
               if (propValue) {
-                if (process.env.NODE_ENV !== 'production') {
+                if ("production" !== 'production') {
                   this._previousStyle = propValue;
                 }
                 propValue = this._previousStyleCopy = assign({}, props.style);
@@ -5513,7 +4974,7 @@ $__System.registerDynamic("8a", ["6e", "77", "6a", "8b", "5d", "8c", "8d", "78",
             nextProps = ReactDOMTextarea.getNativeProps(this, nextProps);
             break;
         }
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           if (this._unprocessedContextDev !== context) {
             this._unprocessedContextDev = context;
             this._processedContextDev = processChildContextDev(context, this);
@@ -5566,7 +5027,7 @@ $__System.registerDynamic("8a", ["6e", "77", "6a", "8b", "5d", "8c", "8d", "78",
           }
           if (propKey === STYLE) {
             if (nextProp) {
-              if (process.env.NODE_ENV !== 'production') {
+              if ("production" !== 'production') {
                 checkAndWarnForMutatedStyle(this._previousStyleCopy, this._previousStyle, this);
                 this._previousStyle = nextProp;
               }
@@ -5668,7 +5129,7 @@ $__System.registerDynamic("8a", ["6e", "77", "6a", "8b", "5d", "8c", "8d", "78",
           case 'html':
           case 'head':
           case 'body':
-            !false ? process.env.NODE_ENV !== 'production' ? invariant(false, '<%s> tried to unmount. Because of cross-browser quirks it is ' + 'impossible to unmount some top-level components (eg <html>, ' + '<head>, and <body>) reliably and efficiently. To fix this, have a ' + 'single top-level component that never unmounts render these ' + 'elements.', this._tag) : invariant(false) : undefined;
+            !false ? "production" !== 'production' ? invariant(false, '<%s> tried to unmount. Because of cross-browser quirks it is ' + 'impossible to unmount some top-level components (eg <html>, ' + '<head>, and <body>) reliably and efficiently. To fix this, have a ' + 'single top-level component that never unmounts render these ' + 'elements.', this._tag) : invariant(false) : undefined;
             break;
         }
         this.unmountChildren();
@@ -5693,7 +5154,7 @@ $__System.registerDynamic("8a", ["6e", "77", "6a", "8b", "5d", "8c", "8d", "78",
           node.forceUpdate = legacySetStateEtc;
           node.setProps = legacySetProps;
           node.replaceProps = legacyReplaceProps;
-          if (process.env.NODE_ENV !== 'production') {
+          if ("production" !== 'production') {
             if (canDefineProperty) {
               Object.defineProperties(node, legacyPropsDescriptor);
             } else {
@@ -5713,24 +5174,23 @@ $__System.registerDynamic("8a", ["6e", "77", "6a", "8b", "5d", "8c", "8d", "78",
     });
     assign(ReactDOMComponent.prototype, ReactDOMComponent.Mixin, ReactMultiChild.Mixin);
     module.exports = ReactDOMComponent;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("95", ["6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("97", ["6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var invariant = $__require('6d');
+    var invariant = $__require('6f');
     function toArray(obj) {
       var length = obj.length;
-      !(!Array.isArray(obj) && (typeof obj === 'object' || typeof obj === 'function')) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'toArray: Array-like object expected') : invariant(false) : undefined;
-      !(typeof length === 'number') ? process.env.NODE_ENV !== 'production' ? invariant(false, 'toArray: Object needs a length property') : invariant(false) : undefined;
-      !(length === 0 || length - 1 in obj) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'toArray: Object should have keys for indices') : invariant(false) : undefined;
+      !(!Array.isArray(obj) && (typeof obj === 'object' || typeof obj === 'function')) ? "production" !== 'production' ? invariant(false, 'toArray: Array-like object expected') : invariant(false) : undefined;
+      !(typeof length === 'number') ? "production" !== 'production' ? invariant(false, 'toArray: Object needs a length property') : invariant(false) : undefined;
+      !(length === 0 || length - 1 in obj) ? "production" !== 'production' ? invariant(false, 'toArray: Object should have keys for indices') : invariant(false) : undefined;
       if (obj.hasOwnProperty) {
         try {
           return Array.prototype.slice.call(obj);
@@ -5743,18 +5203,17 @@ $__System.registerDynamic("95", ["6d", "49"], true, function($__require, exports
       return ret;
     }
     module.exports = toArray;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("96", ["95"], true, function($__require, exports, module) {
+$__System.registerDynamic("98", ["97"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var toArray = $__require('95');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var toArray = $__require('97');
   function hasArrayNature(obj) {
     return (!!obj && (typeof obj == 'object' || typeof obj == 'function') && 'length' in obj && !('setInterval' in obj) && typeof obj.nodeType != 'number' && (Array.isArray(obj) || 'callee' in obj || 'item' in obj));
   }
@@ -5768,21 +5227,20 @@ $__System.registerDynamic("96", ["95"], true, function($__require, exports, modu
     }
   }
   module.exports = createArrayFromMixed;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("97", ["54", "96", "98", "6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("99", ["56", "98", "9a", "6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ExecutionEnvironment = $__require('54');
-    var createArrayFromMixed = $__require('96');
-    var getMarkupWrap = $__require('98');
-    var invariant = $__require('6d');
+    var ExecutionEnvironment = $__require('56');
+    var createArrayFromMixed = $__require('98');
+    var getMarkupWrap = $__require('9a');
+    var invariant = $__require('6f');
     var dummyNode = ExecutionEnvironment.canUseDOM ? document.createElement('div') : null;
     var nodeNamePattern = /^\s*<(\w+)/;
     function getNodeName(markup) {
@@ -5791,7 +5249,7 @@ $__System.registerDynamic("97", ["54", "96", "98", "6d", "49"], true, function($
     }
     function createNodesFromMarkup(markup, handleScript) {
       var node = dummyNode;
-      !!!dummyNode ? process.env.NODE_ENV !== 'production' ? invariant(false, 'createNodesFromMarkup dummy not initialized') : invariant(false) : undefined;
+      !!!dummyNode ? "production" !== 'production' ? invariant(false, 'createNodesFromMarkup dummy not initialized') : invariant(false) : undefined;
       var nodeName = getNodeName(markup);
       var wrap = nodeName && getMarkupWrap(nodeName);
       if (wrap) {
@@ -5805,7 +5263,7 @@ $__System.registerDynamic("97", ["54", "96", "98", "6d", "49"], true, function($
       }
       var scripts = node.getElementsByTagName('script');
       if (scripts.length) {
-        !handleScript ? process.env.NODE_ENV !== 'production' ? invariant(false, 'createNodesFromMarkup(...): Unexpected <script> element rendered.') : invariant(false) : undefined;
+        !handleScript ? "production" !== 'production' ? invariant(false, 'createNodesFromMarkup(...): Unexpected <script> element rendered.') : invariant(false) : undefined;
         createArrayFromMixed(scripts).forEach(handleScript);
       }
       var nodes = createArrayFromMixed(node.childNodes);
@@ -5815,20 +5273,19 @@ $__System.registerDynamic("97", ["54", "96", "98", "6d", "49"], true, function($
       return nodes;
     }
     module.exports = createNodesFromMarkup;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("98", ["54", "6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("9a", ["56", "6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ExecutionEnvironment = $__require('54');
-    var invariant = $__require('6d');
+    var ExecutionEnvironment = $__require('56');
+    var invariant = $__require('6f');
     var dummyNode = ExecutionEnvironment.canUseDOM ? document.createElement('div') : null;
     var shouldWrap = {};
     var selectWrap = [1, '<select multiple="true">', '</select>'];
@@ -5858,7 +5315,7 @@ $__System.registerDynamic("98", ["54", "6d", "49"], true, function($__require, e
       shouldWrap[nodeName] = true;
     });
     function getMarkupWrap(nodeName) {
-      !!!dummyNode ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Markup wrapping node not initialized') : invariant(false) : undefined;
+      !!!dummyNode ? "production" !== 'production' ? invariant(false, 'Markup wrapping node not initialized') : invariant(false) : undefined;
       if (!markupWrap.hasOwnProperty(nodeName)) {
         nodeName = '*';
       }
@@ -5873,23 +5330,22 @@ $__System.registerDynamic("98", ["54", "6d", "49"], true, function($__require, e
       return shouldWrap[nodeName] ? markupWrap[nodeName] : null;
     }
     module.exports = getMarkupWrap;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("99", ["54", "97", "9a", "98", "6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("9b", ["56", "99", "9c", "9a", "6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ExecutionEnvironment = $__require('54');
-    var createNodesFromMarkup = $__require('97');
-    var emptyFunction = $__require('9a');
-    var getMarkupWrap = $__require('98');
-    var invariant = $__require('6d');
+    var ExecutionEnvironment = $__require('56');
+    var createNodesFromMarkup = $__require('99');
+    var emptyFunction = $__require('9c');
+    var getMarkupWrap = $__require('9a');
+    var invariant = $__require('6f');
     var OPEN_TAG_NAME_EXP = /^(<[^ \/>]+)/;
     var RESULT_INDEX_ATTR = 'data-danger-index';
     function getNodeName(markup) {
@@ -5897,11 +5353,11 @@ $__System.registerDynamic("99", ["54", "97", "9a", "98", "6d", "49"], true, func
     }
     var Danger = {
       dangerouslyRenderMarkup: function(markupList) {
-        !ExecutionEnvironment.canUseDOM ? process.env.NODE_ENV !== 'production' ? invariant(false, 'dangerouslyRenderMarkup(...): Cannot render markup in a worker ' + 'thread. Make sure `window` and `document` are available globally ' + 'before requiring React when unit testing or use ' + 'ReactDOMServer.renderToString for server rendering.') : invariant(false) : undefined;
+        !ExecutionEnvironment.canUseDOM ? "production" !== 'production' ? invariant(false, 'dangerouslyRenderMarkup(...): Cannot render markup in a worker ' + 'thread. Make sure `window` and `document` are available globally ' + 'before requiring React when unit testing or use ' + 'ReactDOMServer.renderToString for server rendering.') : invariant(false) : undefined;
         var nodeName;
         var markupByNodeName = {};
         for (var i = 0; i < markupList.length; i++) {
-          !markupList[i] ? process.env.NODE_ENV !== 'production' ? invariant(false, 'dangerouslyRenderMarkup(...): Missing markup.') : invariant(false) : undefined;
+          !markupList[i] ? "production" !== 'production' ? invariant(false, 'dangerouslyRenderMarkup(...): Missing markup.') : invariant(false) : undefined;
           nodeName = getNodeName(markupList[i]);
           nodeName = getMarkupWrap(nodeName) ? nodeName : '*';
           markupByNodeName[nodeName] = markupByNodeName[nodeName] || [];
@@ -5927,22 +5383,22 @@ $__System.registerDynamic("99", ["54", "97", "9a", "98", "6d", "49"], true, func
             if (renderNode.hasAttribute && renderNode.hasAttribute(RESULT_INDEX_ATTR)) {
               resultIndex = +renderNode.getAttribute(RESULT_INDEX_ATTR);
               renderNode.removeAttribute(RESULT_INDEX_ATTR);
-              !!resultList.hasOwnProperty(resultIndex) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Danger: Assigning to an already-occupied result index.') : invariant(false) : undefined;
+              !!resultList.hasOwnProperty(resultIndex) ? "production" !== 'production' ? invariant(false, 'Danger: Assigning to an already-occupied result index.') : invariant(false) : undefined;
               resultList[resultIndex] = renderNode;
               resultListAssignmentCount += 1;
-            } else if (process.env.NODE_ENV !== 'production') {
+            } else if ("production" !== 'production') {
               console.error('Danger: Discarding unexpected node:', renderNode);
             }
           }
         }
-        !(resultListAssignmentCount === resultList.length) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Danger: Did not assign to every index of resultList.') : invariant(false) : undefined;
-        !(resultList.length === markupList.length) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Danger: Expected markup to render %s nodes, but rendered %s.', markupList.length, resultList.length) : invariant(false) : undefined;
+        !(resultListAssignmentCount === resultList.length) ? "production" !== 'production' ? invariant(false, 'Danger: Did not assign to every index of resultList.') : invariant(false) : undefined;
+        !(resultList.length === markupList.length) ? "production" !== 'production' ? invariant(false, 'Danger: Expected markup to render %s nodes, but rendered %s.', markupList.length, resultList.length) : invariant(false) : undefined;
         return resultList;
       },
       dangerouslyReplaceNodeWithMarkup: function(oldChild, markup) {
-        !ExecutionEnvironment.canUseDOM ? process.env.NODE_ENV !== 'production' ? invariant(false, 'dangerouslyReplaceNodeWithMarkup(...): Cannot render markup in a ' + 'worker thread. Make sure `window` and `document` are available ' + 'globally before requiring React when unit testing or use ' + 'ReactDOMServer.renderToString() for server rendering.') : invariant(false) : undefined;
-        !markup ? process.env.NODE_ENV !== 'production' ? invariant(false, 'dangerouslyReplaceNodeWithMarkup(...): Missing markup.') : invariant(false) : undefined;
-        !(oldChild.tagName.toLowerCase() !== 'html') ? process.env.NODE_ENV !== 'production' ? invariant(false, 'dangerouslyReplaceNodeWithMarkup(...): Cannot replace markup of the ' + '<html> node. This is because browser quirks make this unreliable ' + 'and/or slow. If you want to render to the root you must use ' + 'server rendering. See ReactDOMServer.renderToString().') : invariant(false) : undefined;
+        !ExecutionEnvironment.canUseDOM ? "production" !== 'production' ? invariant(false, 'dangerouslyReplaceNodeWithMarkup(...): Cannot render markup in a ' + 'worker thread. Make sure `window` and `document` are available ' + 'globally before requiring React when unit testing or use ' + 'ReactDOMServer.renderToString() for server rendering.') : invariant(false) : undefined;
+        !markup ? "production" !== 'production' ? invariant(false, 'dangerouslyReplaceNodeWithMarkup(...): Missing markup.') : invariant(false) : undefined;
+        !(oldChild.tagName.toLowerCase() !== 'html') ? "production" !== 'production' ? invariant(false, 'dangerouslyReplaceNodeWithMarkup(...): Cannot replace markup of the ' + '<html> node. This is because browser quirks make this unreliable ' + 'and/or slow. If you want to render to the root you must use ' + 'server rendering. See ReactDOMServer.renderToString().') : invariant(false) : undefined;
         var newChild;
         if (typeof markup === 'string') {
           newChild = createNodesFromMarkup(markup, emptyFunction)[0];
@@ -5953,18 +5409,17 @@ $__System.registerDynamic("99", ["54", "97", "9a", "98", "6d", "49"], true, func
       }
     };
     module.exports = Danger;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("89", ["9b"], true, function($__require, exports, module) {
+$__System.registerDynamic("8b", ["9d"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var keyMirror = $__require('9b');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var keyMirror = $__require('9d');
   var ReactMultiChildUpdateTypes = keyMirror({
     INSERT_MARKUP: null,
     MOVE_EXISTING: null,
@@ -5973,23 +5428,22 @@ $__System.registerDynamic("89", ["9b"], true, function($__require, exports, modu
     TEXT_CONTENT: null
   });
   module.exports = ReactMultiChildUpdateTypes;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("9c", ["99", "89", "4e", "91", "92", "6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("9e", ["9b", "8b", "4f", "93", "94", "6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var Danger = $__require('99');
-    var ReactMultiChildUpdateTypes = $__require('89');
-    var ReactPerf = $__require('4e');
-    var setInnerHTML = $__require('91');
-    var setTextContent = $__require('92');
-    var invariant = $__require('6d');
+    var Danger = $__require('9b');
+    var ReactMultiChildUpdateTypes = $__require('8b');
+    var ReactPerf = $__require('4f');
+    var setInnerHTML = $__require('93');
+    var setTextContent = $__require('94');
+    var invariant = $__require('6f');
     function insertChildAt(parentNode, childNode, index) {
       var beforeChild = index >= parentNode.childNodes.length ? null : parentNode.childNodes.item(index);
       parentNode.insertBefore(childNode, beforeChild);
@@ -6007,7 +5461,7 @@ $__System.registerDynamic("9c", ["99", "89", "4e", "91", "92", "6d", "49"], true
             var updatedIndex = update.fromIndex;
             var updatedChild = update.parentNode.childNodes[updatedIndex];
             var parentID = update.parentID;
-            !updatedChild ? process.env.NODE_ENV !== 'production' ? invariant(false, 'processUpdates(): Unable to find child %s of element. This ' + 'probably means the DOM was unexpectedly mutated (e.g., by the ' + 'browser), usually due to forgetting a <tbody> when using tables, ' + 'nesting tags like <form>, <p>, or <a>, or using non-SVG elements ' + 'in an <svg> parent. Try inspecting the child nodes of the element ' + 'with React ID `%s`.', updatedIndex, parentID) : invariant(false) : undefined;
+            !updatedChild ? "production" !== 'production' ? invariant(false, 'processUpdates(): Unable to find child %s of element. This ' + 'probably means the DOM was unexpectedly mutated (e.g., by the ' + 'browser), usually due to forgetting a <tbody> when using tables, ' + 'nesting tags like <form>, <p>, or <a>, or using non-SVG elements ' + 'in an <svg> parent. Try inspecting the child nodes of the element ' + 'with React ID `%s`.', updatedIndex, parentID) : invariant(false) : undefined;
             initialChildren = initialChildren || {};
             initialChildren[parentID] = initialChildren[parentID] || [];
             initialChildren[parentID][updatedIndex] = updatedChild;
@@ -6049,37 +5503,35 @@ $__System.registerDynamic("9c", ["99", "89", "4e", "91", "92", "6d", "49"], true
     };
     ReactPerf.measureMethods(DOMChildrenOperations, 'DOMChildrenOperations', {updateTextContent: 'updateTextContent'});
     module.exports = DOMChildrenOperations;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("9d", ["90"], true, function($__require, exports, module) {
+$__System.registerDynamic("9f", ["92"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var escapeTextContentForBrowser = $__require('90');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var escapeTextContentForBrowser = $__require('92');
   function quoteAttributeValueForBrowser(value) {
     return '"' + escapeTextContentForBrowser(value) + '"';
   }
   module.exports = quoteAttributeValueForBrowser;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("8b", ["6a", "4e", "9d", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("8d", ["6c", "4f", "9f", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var DOMProperty = $__require('6a');
-    var ReactPerf = $__require('4e');
-    var quoteAttributeValueForBrowser = $__require('9d');
-    var warning = $__require('53');
+    var DOMProperty = $__require('6c');
+    var ReactPerf = $__require('4f');
+    var quoteAttributeValueForBrowser = $__require('9f');
+    var warning = $__require('55');
     var VALID_ATTRIBUTE_NAME_REGEX = /^[a-zA-Z_][\w\.\-]*$/;
     var illegalAttributeNameCache = {};
     var validatedAttributeNameCache = {};
@@ -6095,13 +5547,13 @@ $__System.registerDynamic("8b", ["6a", "4e", "9d", "53", "49"], true, function($
         return true;
       }
       illegalAttributeNameCache[attributeName] = true;
-      process.env.NODE_ENV !== 'production' ? warning(false, 'Invalid attribute name: `%s`', attributeName) : undefined;
+      "production" !== 'production' ? warning(false, 'Invalid attribute name: `%s`', attributeName) : undefined;
       return false;
     }
     function shouldIgnoreValue(propertyInfo, value) {
       return value == null || propertyInfo.hasBooleanValue && !value || propertyInfo.hasNumericValue && isNaN(value) || propertyInfo.hasPositiveNumericValue && value < 1 || propertyInfo.hasOverloadedBooleanValue && value === false;
     }
-    if (process.env.NODE_ENV !== 'production') {
+    if ("production" !== 'production') {
       var reactProps = {
         children: true,
         dangerouslySetInnerHTML: true,
@@ -6116,7 +5568,7 @@ $__System.registerDynamic("8b", ["6a", "4e", "9d", "53", "49"], true, function($
         warnedProperties[name] = true;
         var lowerCasedName = name.toLowerCase();
         var standardName = DOMProperty.isCustomAttribute(lowerCasedName) ? lowerCasedName : DOMProperty.getPossibleStandardName.hasOwnProperty(lowerCasedName) ? DOMProperty.getPossibleStandardName[lowerCasedName] : null;
-        process.env.NODE_ENV !== 'production' ? warning(standardName == null, 'Unknown DOM property %s. Did you mean %s?', name, standardName) : undefined;
+        "production" !== 'production' ? warning(standardName == null, 'Unknown DOM property %s. Did you mean %s?', name, standardName) : undefined;
       };
     }
     var DOMPropertyOperations = {
@@ -6142,7 +5594,7 @@ $__System.registerDynamic("8b", ["6a", "4e", "9d", "53", "49"], true, function($
             return '';
           }
           return name + '=' + quoteAttributeValueForBrowser(value);
-        } else if (process.env.NODE_ENV !== 'production') {
+        } else if ("production" !== 'production') {
           warnUnknownProperty(name);
         }
         return null;
@@ -6179,7 +5631,7 @@ $__System.registerDynamic("8b", ["6a", "4e", "9d", "53", "49"], true, function($
           }
         } else if (DOMProperty.isCustomAttribute(name)) {
           DOMPropertyOperations.setValueForAttribute(node, name, value);
-        } else if (process.env.NODE_ENV !== 'production') {
+        } else if ("production" !== 'production') {
           warnUnknownProperty(name);
         }
       },
@@ -6210,7 +5662,7 @@ $__System.registerDynamic("8b", ["6a", "4e", "9d", "53", "49"], true, function($
           }
         } else if (DOMProperty.isCustomAttribute(name)) {
           node.removeAttribute(name);
-        } else if (process.env.NODE_ENV !== 'production') {
+        } else if ("production" !== 'production') {
           warnUnknownProperty(name);
         }
       }
@@ -6221,23 +5673,22 @@ $__System.registerDynamic("8b", ["6a", "4e", "9d", "53", "49"], true, function($
       deleteValueForProperty: 'deleteValueForProperty'
     });
     module.exports = DOMPropertyOperations;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("7a", ["9c", "8b", "48", "4e", "6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("7c", ["9e", "8d", "4a", "4f", "6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var DOMChildrenOperations = $__require('9c');
-    var DOMPropertyOperations = $__require('8b');
-    var ReactMount = $__require('48');
-    var ReactPerf = $__require('4e');
-    var invariant = $__require('6d');
+    var DOMChildrenOperations = $__require('9e');
+    var DOMPropertyOperations = $__require('8d');
+    var ReactMount = $__require('4a');
+    var ReactPerf = $__require('4f');
+    var invariant = $__require('6f');
     var INVALID_PROPERTY_ERRORS = {
       dangerouslySetInnerHTML: '`dangerouslySetInnerHTML` must be set using `updateInnerHTMLByID()`.',
       style: '`style` must be set using `updateStylesByID()`.'
@@ -6245,7 +5696,7 @@ $__System.registerDynamic("7a", ["9c", "8b", "48", "4e", "6d", "49"], true, func
     var ReactDOMIDOperations = {
       updatePropertyByID: function(id, name, value) {
         var node = ReactMount.getNode(id);
-        !!INVALID_PROPERTY_ERRORS.hasOwnProperty(name) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'updatePropertyByID(...): %s', INVALID_PROPERTY_ERRORS[name]) : invariant(false) : undefined;
+        !!INVALID_PROPERTY_ERRORS.hasOwnProperty(name) ? "production" !== 'production' ? invariant(false, 'updatePropertyByID(...): %s', INVALID_PROPERTY_ERRORS[name]) : invariant(false) : undefined;
         if (value != null) {
           DOMPropertyOperations.setValueForProperty(node, name, value);
         } else {
@@ -6268,20 +5719,19 @@ $__System.registerDynamic("7a", ["9c", "8b", "48", "4e", "6d", "49"], true, func
       dangerouslyProcessChildrenUpdates: 'dangerouslyProcessChildrenUpdates'
     });
     module.exports = ReactDOMIDOperations;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("8d", ["7a", "48", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("8f", ["7c", "4a", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactDOMIDOperations = $__require('7a');
-    var ReactMount = $__require('48');
+    var ReactDOMIDOperations = $__require('7c');
+    var ReactMount = $__require('4a');
     var ReactComponentBrowserEnvironment = {
       processChildrenUpdates: ReactDOMIDOperations.dangerouslyProcessChildrenUpdates,
       replaceNodeWithMarkupByID: ReactDOMIDOperations.dangerouslyReplaceNodeWithMarkupByID,
@@ -6290,17 +5740,16 @@ $__System.registerDynamic("8d", ["7a", "48", "49"], true, function($__require, e
       }
     };
     module.exports = ReactComponentBrowserEnvironment;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("90", [], true, function($__require, exports, module) {
+$__System.registerDynamic("92", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var ESCAPE_LOOKUP = {
     '&': '&amp;',
     '>': '&gt;',
@@ -6316,19 +5765,18 @@ $__System.registerDynamic("90", [], true, function($__require, exports, module) 
     return ('' + text).replace(ESCAPE_REGEX, escaper);
   }
   module.exports = escapeTextContentForBrowser;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("92", ["54", "90", "91"], true, function($__require, exports, module) {
+$__System.registerDynamic("94", ["56", "92", "93"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var ExecutionEnvironment = $__require('54');
-  var escapeTextContentForBrowser = $__require('90');
-  var setInnerHTML = $__require('91');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var ExecutionEnvironment = $__require('56');
+  var escapeTextContentForBrowser = $__require('92');
+  var setInnerHTML = $__require('93');
   var setTextContent = function(node, text) {
     node.textContent = text;
   };
@@ -6340,25 +5788,24 @@ $__System.registerDynamic("92", ["54", "90", "91"], true, function($__require, e
     }
   }
   module.exports = setTextContent;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("4b", ["9c", "8b", "8d", "48", "57", "90", "92", "94", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("4c", ["9e", "8d", "8f", "4a", "59", "92", "94", "95", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var DOMChildrenOperations = $__require('9c');
-    var DOMPropertyOperations = $__require('8b');
-    var ReactComponentBrowserEnvironment = $__require('8d');
-    var ReactMount = $__require('48');
-    var assign = $__require('57');
-    var escapeTextContentForBrowser = $__require('90');
-    var setTextContent = $__require('92');
-    var validateDOMNesting = $__require('94');
+    var DOMChildrenOperations = $__require('9e');
+    var DOMPropertyOperations = $__require('8d');
+    var ReactComponentBrowserEnvironment = $__require('8f');
+    var ReactMount = $__require('4a');
+    var assign = $__require('59');
+    var escapeTextContentForBrowser = $__require('92');
+    var setTextContent = $__require('94');
+    var validateDOMNesting = $__require('95');
     var ReactDOMTextComponent = function(props) {};
     assign(ReactDOMTextComponent.prototype, {
       construct: function(text) {
@@ -6368,7 +5815,7 @@ $__System.registerDynamic("4b", ["9c", "8b", "8d", "48", "57", "90", "92", "94",
         this._mountIndex = 0;
       },
       mountComponent: function(rootID, transaction, context) {
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           if (context[validateDOMNesting.ancestorInfoContextKey]) {
             validateDOMNesting('span', null, context[validateDOMNesting.ancestorInfoContextKey]);
           }
@@ -6405,17 +5852,16 @@ $__System.registerDynamic("4b", ["9c", "8b", "8d", "48", "57", "90", "92", "94",
       }
     });
     module.exports = ReactDOMTextComponent;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("9e", [], true, function($__require, exports, module) {
+$__System.registerDynamic("a0", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   function getUnboundedScrollPosition(scrollable) {
     if (scrollable === window) {
       return {
@@ -6429,26 +5875,25 @@ $__System.registerDynamic("9e", [], true, function($__require, exports, module) 
     };
   }
   module.exports = getUnboundedScrollPosition;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("9f", ["a0", "54", "56", "4d", "48", "50", "57", "62", "9e", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("a1", ["a2", "56", "58", "4e", "4a", "51", "59", "64", "a0", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var EventListener = $__require('a0');
-    var ExecutionEnvironment = $__require('54');
-    var PooledClass = $__require('56');
-    var ReactInstanceHandles = $__require('4d');
-    var ReactMount = $__require('48');
-    var ReactUpdates = $__require('50');
-    var assign = $__require('57');
-    var getEventTarget = $__require('62');
-    var getUnboundedScrollPosition = $__require('9e');
+    var EventListener = $__require('a2');
+    var ExecutionEnvironment = $__require('56');
+    var PooledClass = $__require('58');
+    var ReactInstanceHandles = $__require('4e');
+    var ReactMount = $__require('4a');
+    var ReactUpdates = $__require('51');
+    var assign = $__require('59');
+    var getEventTarget = $__require('64');
+    var getUnboundedScrollPosition = $__require('a0');
     var DOCUMENT_FRAGMENT_NODE_TYPE = 11;
     function findParent(node) {
       var nodeID = ReactMount.getID(node);
@@ -6561,27 +6006,26 @@ $__System.registerDynamic("9f", ["a0", "54", "56", "4d", "48", "50", "57", "62",
       }
     };
     module.exports = ReactEventListener;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("a1", ["6a", "61", "88", "a2", "a3", "8c", "a4", "4e", "a5", "50"], true, function($__require, exports, module) {
+$__System.registerDynamic("a3", ["6c", "63", "8a", "a4", "a5", "8e", "a6", "4f", "a7", "51"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var DOMProperty = $__require('6a');
-  var EventPluginHub = $__require('61');
-  var ReactComponentEnvironment = $__require('88');
-  var ReactClass = $__require('a2');
-  var ReactEmptyComponent = $__require('a3');
-  var ReactBrowserEventEmitter = $__require('8c');
-  var ReactNativeComponent = $__require('a4');
-  var ReactPerf = $__require('4e');
-  var ReactRootIndex = $__require('a5');
-  var ReactUpdates = $__require('50');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var DOMProperty = $__require('6c');
+  var EventPluginHub = $__require('63');
+  var ReactComponentEnvironment = $__require('8a');
+  var ReactClass = $__require('a4');
+  var ReactEmptyComponent = $__require('a5');
+  var ReactBrowserEventEmitter = $__require('8e');
+  var ReactNativeComponent = $__require('a6');
+  var ReactPerf = $__require('4f');
+  var ReactRootIndex = $__require('a7');
+  var ReactUpdates = $__require('51');
   var ReactInjection = {
     Component: ReactComponentEnvironment.injection,
     Class: ReactClass.injection,
@@ -6595,23 +6039,22 @@ $__System.registerDynamic("a1", ["6a", "61", "88", "a2", "a3", "8c", "a4", "4e",
     Updates: ReactUpdates.injection
   };
   module.exports = ReactInjection;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("a6", ["a7", "56", "8c", "a8", "a9", "aa", "57"], true, function($__require, exports, module) {
+$__System.registerDynamic("a8", ["a9", "58", "8e", "aa", "ab", "ac", "59"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var CallbackQueue = $__require('a7');
-  var PooledClass = $__require('56');
-  var ReactBrowserEventEmitter = $__require('8c');
-  var ReactDOMFeatureFlags = $__require('a8');
-  var ReactInputSelection = $__require('a9');
-  var Transaction = $__require('aa');
-  var assign = $__require('57');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var CallbackQueue = $__require('a9');
+  var PooledClass = $__require('58');
+  var ReactBrowserEventEmitter = $__require('8e');
+  var ReactDOMFeatureFlags = $__require('aa');
+  var ReactInputSelection = $__require('ab');
+  var Transaction = $__require('ac');
+  var assign = $__require('59');
   var SELECTION_RESTORATION = {
     initialize: ReactInputSelection.getSelectionInformation,
     close: ReactInputSelection.restoreSelection
@@ -6656,16 +6099,15 @@ $__System.registerDynamic("a6", ["a7", "56", "8c", "a8", "a9", "aa", "57"], true
   assign(ReactReconcileTransaction.prototype, Transaction.Mixin, Mixin);
   PooledClass.addPoolingTo(ReactReconcileTransaction);
   module.exports = ReactReconcileTransaction;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("ab", [], true, function($__require, exports, module) {
+$__System.registerDynamic("ad", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   function getLeafNode(node) {
     while (node && node.firstChild) {
       node = node.firstChild;
@@ -6699,17 +6141,16 @@ $__System.registerDynamic("ab", [], true, function($__require, exports, module) 
     }
   }
   module.exports = getNodeForCharacterOffset;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("58", ["54"], true, function($__require, exports, module) {
+$__System.registerDynamic("5a", ["56"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var ExecutionEnvironment = $__require('54');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var ExecutionEnvironment = $__require('56');
   var contentKey = null;
   function getTextContentAccessor() {
     if (!contentKey && ExecutionEnvironment.canUseDOM) {
@@ -6718,19 +6159,18 @@ $__System.registerDynamic("58", ["54"], true, function($__require, exports, modu
     return contentKey;
   }
   module.exports = getTextContentAccessor;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("ac", ["54", "ab", "58"], true, function($__require, exports, module) {
+$__System.registerDynamic("ae", ["56", "ad", "5a"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var ExecutionEnvironment = $__require('54');
-  var getNodeForCharacterOffset = $__require('ab');
-  var getTextContentAccessor = $__require('58');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var ExecutionEnvironment = $__require('56');
+  var getNodeForCharacterOffset = $__require('ad');
+  var getTextContentAccessor = $__require('5a');
   function isCollapsed(anchorNode, anchorOffset, focusNode, focusOffset) {
     return anchorNode === focusNode && anchorOffset === focusOffset;
   }
@@ -6835,36 +6275,34 @@ $__System.registerDynamic("ac", ["54", "ab", "58"], true, function($__require, e
     setOffsets: useIEOffsets ? setIEOffsets : setModernOffsets
   };
   module.exports = ReactDOMSelection;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("6f", [], true, function($__require, exports, module) {
+$__System.registerDynamic("71", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   function focusNode(node) {
     try {
       node.focus();
     } catch (e) {}
   }
   module.exports = focusNode;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("a9", ["ac", "ad", "6f", "ae"], true, function($__require, exports, module) {
+$__System.registerDynamic("ab", ["ae", "af", "71", "b0"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var ReactDOMSelection = $__require('ac');
-  var containsNode = $__require('ad');
-  var focusNode = $__require('6f');
-  var getActiveElement = $__require('ae');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var ReactDOMSelection = $__require('ae');
+  var containsNode = $__require('af');
+  var focusNode = $__require('71');
+  var getActiveElement = $__require('b0');
   function isInDocument(node) {
     return containsNode(document.documentElement, node);
   }
@@ -6935,16 +6373,15 @@ $__System.registerDynamic("a9", ["ac", "ad", "6f", "ae"], true, function($__requ
     }
   };
   module.exports = ReactInputSelection;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("ae", [], true, function($__require, exports, module) {
+$__System.registerDynamic("b0", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   function getActiveElement() {
     if (typeof document === 'undefined') {
       return null;
@@ -6956,16 +6393,15 @@ $__System.registerDynamic("ae", [], true, function($__require, exports, module) 
     }
   }
   module.exports = getActiveElement;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("64", [], true, function($__require, exports, module) {
+$__System.registerDynamic("66", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var supportedInputTypes = {
     'color': true,
     'date': true,
@@ -6988,16 +6424,15 @@ $__System.registerDynamic("64", [], true, function($__require, exports, module) 
     return nodeName && (nodeName === 'input' && supportedInputTypes[elem.type] || nodeName === 'textarea');
   }
   module.exports = isTextInputElement;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("93", [], true, function($__require, exports, module) {
+$__System.registerDynamic("96", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var hasOwnProperty = Object.prototype.hasOwnProperty;
   function shallowEqual(objA, objB) {
     if (objA === objB) {
@@ -7020,25 +6455,24 @@ $__System.registerDynamic("93", [], true, function($__require, exports, module) 
     return true;
   }
   module.exports = shallowEqual;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("af", ["5d", "5e", "54", "a9", "5a", "ae", "64", "5f", "93"], true, function($__require, exports, module) {
+$__System.registerDynamic("b1", ["5f", "60", "56", "ab", "5c", "b0", "66", "61", "96"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var EventConstants = $__require('5d');
-  var EventPropagators = $__require('5e');
-  var ExecutionEnvironment = $__require('54');
-  var ReactInputSelection = $__require('a9');
-  var SyntheticEvent = $__require('5a');
-  var getActiveElement = $__require('ae');
-  var isTextInputElement = $__require('64');
-  var keyOf = $__require('5f');
-  var shallowEqual = $__require('93');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var EventConstants = $__require('5f');
+  var EventPropagators = $__require('60');
+  var ExecutionEnvironment = $__require('56');
+  var ReactInputSelection = $__require('ab');
+  var SyntheticEvent = $__require('5c');
+  var getActiveElement = $__require('b0');
+  var isTextInputElement = $__require('66');
+  var keyOf = $__require('61');
+  var shallowEqual = $__require('96');
   var topLevelTypes = EventConstants.topLevelTypes;
   var skipSelectionChangeEvent = ExecutionEnvironment.canUseDOM && 'documentMode' in document && document.documentMode <= 11;
   var eventTypes = {select: {
@@ -7136,33 +6570,31 @@ $__System.registerDynamic("af", ["5d", "5e", "54", "a9", "5a", "ae", "64", "5f",
     }
   };
   module.exports = SelectEventPlugin;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("b0", [], true, function($__require, exports, module) {
+$__System.registerDynamic("b2", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var GLOBAL_MOUNT_POINT_MAX = Math.pow(2, 53);
   var ServerReactRootIndex = {createReactRootIndex: function() {
       return Math.ceil(Math.random() * GLOBAL_MOUNT_POINT_MAX);
     }};
   module.exports = ServerReactRootIndex;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("a0", ["9a", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("a2", ["9c", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var emptyFunction = $__require('9a');
+    var emptyFunction = $__require('9c');
     var EventListener = {
       listen: function(target, eventType, callback) {
         if (target.addEventListener) {
@@ -7184,7 +6616,7 @@ $__System.registerDynamic("a0", ["9a", "49"], true, function($__require, exports
               target.removeEventListener(eventType, callback, true);
             }};
         } else {
-          if (process.env.NODE_ENV !== 'production') {
+          if ("production" !== 'production') {
             console.error('Attempted to listen to events during the capture phase on a ' + 'browser that does not support the capture phase. Your application ' + 'will not receive some events.');
           }
           return {remove: emptyFunction};
@@ -7193,23 +6625,22 @@ $__System.registerDynamic("a0", ["9a", "49"], true, function($__require, exports
       registerDefault: function() {}
     };
     module.exports = EventListener;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("5e", ["5d", "61", "53", "b1", "b2", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("60", ["5f", "63", "55", "b3", "b4", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var EventConstants = $__require('5d');
-    var EventPluginHub = $__require('61');
-    var warning = $__require('53');
-    var accumulateInto = $__require('b1');
-    var forEachAccumulated = $__require('b2');
+    var EventConstants = $__require('5f');
+    var EventPluginHub = $__require('63');
+    var warning = $__require('55');
+    var accumulateInto = $__require('b3');
+    var forEachAccumulated = $__require('b4');
     var PropagationPhases = EventConstants.PropagationPhases;
     var getListener = EventPluginHub.getListener;
     function listenerAtPhase(id, event, propagationPhase) {
@@ -7217,8 +6648,8 @@ $__System.registerDynamic("5e", ["5d", "61", "53", "b1", "b2", "49"], true, func
       return getListener(id, registrationName);
     }
     function accumulateDirectionalDispatches(domID, upwards, event) {
-      if (process.env.NODE_ENV !== 'production') {
-        process.env.NODE_ENV !== 'production' ? warning(domID, 'Dispatching id must not be null') : undefined;
+      if ("production" !== 'production') {
+        "production" !== 'production' ? warning(domID, 'Dispatching id must not be null') : undefined;
       }
       var phase = upwards ? PropagationPhases.bubbled : PropagationPhases.captured;
       var listener = listenerAtPhase(domID, event, phase);
@@ -7271,18 +6702,17 @@ $__System.registerDynamic("5e", ["5d", "61", "53", "b1", "b2", "49"], true, func
       accumulateEnterLeaveDispatches: accumulateEnterLeaveDispatches
     };
     module.exports = EventPropagators;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("b3", ["5a"], true, function($__require, exports, module) {
+$__System.registerDynamic("b5", ["5c"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var SyntheticEvent = $__require('5a');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var SyntheticEvent = $__require('5c');
   var ClipboardEventInterface = {clipboardData: function(event) {
       return 'clipboardData' in event ? event.clipboardData : window.clipboardData;
     }};
@@ -7291,34 +6721,32 @@ $__System.registerDynamic("b3", ["5a"], true, function($__require, exports, modu
   }
   SyntheticEvent.augmentClass(SyntheticClipboardEvent, ClipboardEventInterface);
   module.exports = SyntheticClipboardEvent;
-  global.define = __define;
-  return module.exports;
-});
-
-$__System.registerDynamic("b4", ["b5"], true, function($__require, exports, module) {
-  "use strict";
-  ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var SyntheticUIEvent = $__require('b5');
-  var FocusEventInterface = {relatedTarget: null};
-  function SyntheticFocusEvent(dispatchConfig, dispatchMarker, nativeEvent, nativeEventTarget) {
-    SyntheticUIEvent.call(this, dispatchConfig, dispatchMarker, nativeEvent, nativeEventTarget);
-  }
-  SyntheticUIEvent.augmentClass(SyntheticFocusEvent, FocusEventInterface);
-  module.exports = SyntheticFocusEvent;
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("b6", ["b7"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var getEventCharCode = $__require('b7');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var SyntheticUIEvent = $__require('b7');
+  var FocusEventInterface = {relatedTarget: null};
+  function SyntheticFocusEvent(dispatchConfig, dispatchMarker, nativeEvent, nativeEventTarget) {
+    SyntheticUIEvent.call(this, dispatchConfig, dispatchMarker, nativeEvent, nativeEventTarget);
+  }
+  SyntheticUIEvent.augmentClass(SyntheticFocusEvent, FocusEventInterface);
+  module.exports = SyntheticFocusEvent;
+  return module.exports;
+});
+
+$__System.registerDynamic("b8", ["b9"], true, function($__require, exports, module) {
+  "use strict";
+  ;
+  var define,
+      global = this,
+      GLOBAL = this;
+  var getEventCharCode = $__require('b9');
   var normalizeKey = {
     'Esc': 'Escape',
     'Spacebar': ' ',
@@ -7388,20 +6816,19 @@ $__System.registerDynamic("b6", ["b7"], true, function($__require, exports, modu
     return '';
   }
   module.exports = getEventKey;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("b8", ["b5", "b7", "b6", "b9"], true, function($__require, exports, module) {
+$__System.registerDynamic("ba", ["b7", "b9", "b8", "bb"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var SyntheticUIEvent = $__require('b5');
-  var getEventCharCode = $__require('b7');
-  var getEventKey = $__require('b6');
-  var getEventModifierState = $__require('b9');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var SyntheticUIEvent = $__require('b7');
+  var getEventCharCode = $__require('b9');
+  var getEventKey = $__require('b8');
+  var getEventModifierState = $__require('bb');
   var KeyboardEventInterface = {
     key: getEventKey,
     location: null,
@@ -7439,35 +6866,33 @@ $__System.registerDynamic("b8", ["b5", "b7", "b6", "b9"], true, function($__requ
   }
   SyntheticUIEvent.augmentClass(SyntheticKeyboardEvent, KeyboardEventInterface);
   module.exports = SyntheticKeyboardEvent;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("ba", ["68"], true, function($__require, exports, module) {
+$__System.registerDynamic("bc", ["6a"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var SyntheticMouseEvent = $__require('68');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var SyntheticMouseEvent = $__require('6a');
   var DragEventInterface = {dataTransfer: null};
   function SyntheticDragEvent(dispatchConfig, dispatchMarker, nativeEvent, nativeEventTarget) {
     SyntheticMouseEvent.call(this, dispatchConfig, dispatchMarker, nativeEvent, nativeEventTarget);
   }
   SyntheticMouseEvent.augmentClass(SyntheticDragEvent, DragEventInterface);
   module.exports = SyntheticDragEvent;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("bb", ["b5", "b9"], true, function($__require, exports, module) {
+$__System.registerDynamic("bd", ["b7", "bb"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var SyntheticUIEvent = $__require('b5');
-  var getEventModifierState = $__require('b9');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var SyntheticUIEvent = $__require('b7');
+  var getEventModifierState = $__require('bb');
   var TouchEventInterface = {
     touches: null,
     targetTouches: null,
@@ -7483,21 +6908,20 @@ $__System.registerDynamic("bb", ["b5", "b9"], true, function($__require, exports
   }
   SyntheticUIEvent.augmentClass(SyntheticTouchEvent, TouchEventInterface);
   module.exports = SyntheticTouchEvent;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("5a", ["56", "57", "9a", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("5c", ["58", "59", "9c", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var PooledClass = $__require('56');
-    var assign = $__require('57');
-    var emptyFunction = $__require('9a');
-    var warning = $__require('53');
+    var PooledClass = $__require('58');
+    var assign = $__require('59');
+    var emptyFunction = $__require('9c');
+    var warning = $__require('55');
     var EventInterface = {
       type: null,
       currentTarget: emptyFunction.thatReturnsNull,
@@ -7540,8 +6964,8 @@ $__System.registerDynamic("5a", ["56", "57", "9a", "53", "49"], true, function($
       preventDefault: function() {
         this.defaultPrevented = true;
         var event = this.nativeEvent;
-        if (process.env.NODE_ENV !== 'production') {
-          process.env.NODE_ENV !== 'production' ? warning(event, 'This synthetic event is reused for performance reasons. If you\'re ' + 'seeing this, you\'re calling `preventDefault` on a ' + 'released/nullified synthetic event. This is a no-op. See ' + 'https://fb.me/react-event-pooling for more information.') : undefined;
+        if ("production" !== 'production') {
+          "production" !== 'production' ? warning(event, 'This synthetic event is reused for performance reasons. If you\'re ' + 'seeing this, you\'re calling `preventDefault` on a ' + 'released/nullified synthetic event. This is a no-op. See ' + 'https://fb.me/react-event-pooling for more information.') : undefined;
         }
         if (!event) {
           return;
@@ -7555,8 +6979,8 @@ $__System.registerDynamic("5a", ["56", "57", "9a", "53", "49"], true, function($
       },
       stopPropagation: function() {
         var event = this.nativeEvent;
-        if (process.env.NODE_ENV !== 'production') {
-          process.env.NODE_ENV !== 'production' ? warning(event, 'This synthetic event is reused for performance reasons. If you\'re ' + 'seeing this, you\'re calling `stopPropagation` on a ' + 'released/nullified synthetic event. This is a no-op. See ' + 'https://fb.me/react-event-pooling for more information.') : undefined;
+        if ("production" !== 'production') {
+          "production" !== 'production' ? warning(event, 'This synthetic event is reused for performance reasons. If you\'re ' + 'seeing this, you\'re calling `stopPropagation` on a ' + 'released/nullified synthetic event. This is a no-op. See ' + 'https://fb.me/react-event-pooling for more information.') : undefined;
         }
         if (!event) {
           return;
@@ -7595,34 +7019,32 @@ $__System.registerDynamic("5a", ["56", "57", "9a", "53", "49"], true, function($
     };
     PooledClass.addPoolingTo(SyntheticEvent, PooledClass.fourArgumentPooler);
     module.exports = SyntheticEvent;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("62", [], true, function($__require, exports, module) {
+$__System.registerDynamic("64", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   function getEventTarget(nativeEvent) {
     var target = nativeEvent.target || nativeEvent.srcElement || window;
     return target.nodeType === 3 ? target.parentNode : target;
   }
   module.exports = getEventTarget;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("b5", ["5a", "62"], true, function($__require, exports, module) {
+$__System.registerDynamic("b7", ["5c", "64"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var SyntheticEvent = $__require('5a');
-  var getEventTarget = $__require('62');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var SyntheticEvent = $__require('5c');
+  var getEventTarget = $__require('64');
   var UIEventInterface = {
     view: function(event) {
       if (event.view) {
@@ -7648,16 +7070,15 @@ $__System.registerDynamic("b5", ["5a", "62"], true, function($__require, exports
   }
   SyntheticEvent.augmentClass(SyntheticUIEvent, UIEventInterface);
   module.exports = SyntheticUIEvent;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("b9", [], true, function($__require, exports, module) {
+$__System.registerDynamic("bb", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var modifierKeyToProp = {
     'Alt': 'altKey',
     'Control': 'ctrlKey',
@@ -7677,19 +7098,18 @@ $__System.registerDynamic("b9", [], true, function($__require, exports, module) 
     return modifierStateGetter;
   }
   module.exports = getEventModifierState;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("68", ["b5", "bc", "b9"], true, function($__require, exports, module) {
+$__System.registerDynamic("6a", ["b7", "be", "bb"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var SyntheticUIEvent = $__require('b5');
-  var ViewportMetrics = $__require('bc');
-  var getEventModifierState = $__require('b9');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var SyntheticUIEvent = $__require('b7');
+  var ViewportMetrics = $__require('be');
+  var getEventModifierState = $__require('bb');
   var MouseEventInterface = {
     screenX: null,
     screenY: null,
@@ -7723,17 +7143,16 @@ $__System.registerDynamic("68", ["b5", "bc", "b9"], true, function($__require, e
   }
   SyntheticUIEvent.augmentClass(SyntheticMouseEvent, MouseEventInterface);
   module.exports = SyntheticMouseEvent;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("bd", ["68"], true, function($__require, exports, module) {
+$__System.registerDynamic("bf", ["6a"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var SyntheticMouseEvent = $__require('68');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var SyntheticMouseEvent = $__require('6a');
   var WheelEventInterface = {
     deltaX: function(event) {
       return 'deltaX' in event ? event.deltaX : 'wheelDeltaX' in event ? -event.wheelDeltaX : 0;
@@ -7749,16 +7168,15 @@ $__System.registerDynamic("bd", ["68"], true, function($__require, exports, modu
   }
   SyntheticMouseEvent.augmentClass(SyntheticWheelEvent, WheelEventInterface);
   module.exports = SyntheticWheelEvent;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("b7", [], true, function($__require, exports, module) {
+$__System.registerDynamic("b9", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   function getEventCharCode(nativeEvent) {
     var charCode;
     var keyCode = nativeEvent.keyCode;
@@ -7776,34 +7194,33 @@ $__System.registerDynamic("b7", [], true, function($__require, exports, module) 
     return 0;
   }
   module.exports = getEventCharCode;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("be", ["5d", "a0", "5e", "48", "b3", "5a", "b4", "b8", "68", "ba", "bb", "b5", "bd", "9a", "b7", "6d", "5f", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("c0", ["5f", "a2", "60", "4a", "b5", "5c", "b6", "ba", "6a", "bc", "bd", "b7", "bf", "9c", "b9", "6f", "61", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var EventConstants = $__require('5d');
-    var EventListener = $__require('a0');
-    var EventPropagators = $__require('5e');
-    var ReactMount = $__require('48');
-    var SyntheticClipboardEvent = $__require('b3');
-    var SyntheticEvent = $__require('5a');
-    var SyntheticFocusEvent = $__require('b4');
-    var SyntheticKeyboardEvent = $__require('b8');
-    var SyntheticMouseEvent = $__require('68');
-    var SyntheticDragEvent = $__require('ba');
-    var SyntheticTouchEvent = $__require('bb');
-    var SyntheticUIEvent = $__require('b5');
-    var SyntheticWheelEvent = $__require('bd');
-    var emptyFunction = $__require('9a');
-    var getEventCharCode = $__require('b7');
-    var invariant = $__require('6d');
-    var keyOf = $__require('5f');
+    var EventConstants = $__require('5f');
+    var EventListener = $__require('a2');
+    var EventPropagators = $__require('60');
+    var ReactMount = $__require('4a');
+    var SyntheticClipboardEvent = $__require('b5');
+    var SyntheticEvent = $__require('5c');
+    var SyntheticFocusEvent = $__require('b6');
+    var SyntheticKeyboardEvent = $__require('ba');
+    var SyntheticMouseEvent = $__require('6a');
+    var SyntheticDragEvent = $__require('bc');
+    var SyntheticTouchEvent = $__require('bd');
+    var SyntheticUIEvent = $__require('b7');
+    var SyntheticWheelEvent = $__require('bf');
+    var emptyFunction = $__require('9c');
+    var getEventCharCode = $__require('b9');
+    var invariant = $__require('6f');
+    var keyOf = $__require('61');
     var topLevelTypes = EventConstants.topLevelTypes;
     var eventTypes = {
       abort: {phasedRegistrationNames: {
@@ -8190,7 +7607,7 @@ $__System.registerDynamic("be", ["5d", "a0", "5e", "48", "b3", "5a", "b4", "b8",
             EventConstructor = SyntheticClipboardEvent;
             break;
         }
-        !EventConstructor ? process.env.NODE_ENV !== 'production' ? invariant(false, 'SimpleEventPlugin: Unhandled event type, `%s`.', topLevelType) : invariant(false) : undefined;
+        !EventConstructor ? "production" !== 'production' ? invariant(false, 'SimpleEventPlugin: Unhandled event type, `%s`.', topLevelType) : invariant(false) : undefined;
         var event = EventConstructor.getPooled(dispatchConfig, topLevelTargetID, nativeEvent, nativeEventTarget);
         EventPropagators.accumulateTwoPhaseDispatches(event);
         return event;
@@ -8211,18 +7628,17 @@ $__System.registerDynamic("be", ["5d", "a0", "5e", "48", "b3", "5a", "b4", "b8",
       }
     };
     module.exports = SimpleEventPlugin;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("bf", ["6a"], true, function($__require, exports, module) {
+$__System.registerDynamic("c1", ["6c"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var DOMProperty = $__require('6a');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var DOMProperty = $__require('6c');
   var MUST_USE_ATTRIBUTE = DOMProperty.injection.MUST_USE_ATTRIBUTE;
   var NS = {
     xlink: 'http://www.w3.org/1999/xlink',
@@ -8332,17 +7748,16 @@ $__System.registerDynamic("bf", ["6a"], true, function($__require, exports, modu
     }
   };
   module.exports = SVGDOMPropertyConfig;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("c0", ["57"], true, function($__require, exports, module) {
+$__System.registerDynamic("c2", ["59"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var assign = $__require('57');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var assign = $__require('59');
   var DONT_CARE_THRESHOLD = 1.2;
   var DOM_OPERATION_TYPES = {
     '_mountImageIntoNode': 'set innerHTML',
@@ -8489,18 +7904,17 @@ $__System.registerDynamic("c0", ["57"], true, function($__require, exports, modu
     getTotalTime: getTotalTime
   };
   module.exports = ReactDefaultPerfAnalysis;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("6a", ["6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("6c", ["6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var invariant = $__require('6d');
+    var invariant = $__require('6f');
     function checkMask(value, bitmask) {
       return (value & bitmask) === bitmask;
     }
@@ -8523,7 +7937,7 @@ $__System.registerDynamic("6a", ["6d", "49"], true, function($__require, exports
           DOMProperty._isCustomAttributeFunctions.push(domPropertyConfig.isCustomAttribute);
         }
         for (var propName in Properties) {
-          !!DOMProperty.properties.hasOwnProperty(propName) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'injectDOMPropertyConfig(...): You\'re trying to inject DOM property ' + '\'%s\' which has already been injected. You may be accidentally ' + 'injecting the same DOM property config twice, or you may be ' + 'injecting two configs that have conflicting property names.', propName) : invariant(false) : undefined;
+          !!DOMProperty.properties.hasOwnProperty(propName) ? "production" !== 'production' ? invariant(false, 'injectDOMPropertyConfig(...): You\'re trying to inject DOM property ' + '\'%s\' which has already been injected. You may be accidentally ' + 'injecting the same DOM property config twice, or you may be ' + 'injecting two configs that have conflicting property names.', propName) : invariant(false) : undefined;
           var lowerCased = propName.toLowerCase();
           var propConfig = Properties[propName];
           var propertyInfo = {
@@ -8539,16 +7953,16 @@ $__System.registerDynamic("6a", ["6d", "49"], true, function($__require, exports
             hasPositiveNumericValue: checkMask(propConfig, Injection.HAS_POSITIVE_NUMERIC_VALUE),
             hasOverloadedBooleanValue: checkMask(propConfig, Injection.HAS_OVERLOADED_BOOLEAN_VALUE)
           };
-          !(!propertyInfo.mustUseAttribute || !propertyInfo.mustUseProperty) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'DOMProperty: Cannot require using both attribute and property: %s', propName) : invariant(false) : undefined;
-          !(propertyInfo.mustUseProperty || !propertyInfo.hasSideEffects) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'DOMProperty: Properties that have side effects must use property: %s', propName) : invariant(false) : undefined;
-          !(propertyInfo.hasBooleanValue + propertyInfo.hasNumericValue + propertyInfo.hasOverloadedBooleanValue <= 1) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'DOMProperty: Value can be one of boolean, overloaded boolean, or ' + 'numeric value, but not a combination: %s', propName) : invariant(false) : undefined;
-          if (process.env.NODE_ENV !== 'production') {
+          !(!propertyInfo.mustUseAttribute || !propertyInfo.mustUseProperty) ? "production" !== 'production' ? invariant(false, 'DOMProperty: Cannot require using both attribute and property: %s', propName) : invariant(false) : undefined;
+          !(propertyInfo.mustUseProperty || !propertyInfo.hasSideEffects) ? "production" !== 'production' ? invariant(false, 'DOMProperty: Properties that have side effects must use property: %s', propName) : invariant(false) : undefined;
+          !(propertyInfo.hasBooleanValue + propertyInfo.hasNumericValue + propertyInfo.hasOverloadedBooleanValue <= 1) ? "production" !== 'production' ? invariant(false, 'DOMProperty: Value can be one of boolean, overloaded boolean, or ' + 'numeric value, but not a combination: %s', propName) : invariant(false) : undefined;
+          if ("production" !== 'production') {
             DOMProperty.getPossibleStandardName[lowerCased] = propName;
           }
           if (DOMAttributeNames.hasOwnProperty(propName)) {
             var attributeName = DOMAttributeNames[propName];
             propertyInfo.attributeName = attributeName;
-            if (process.env.NODE_ENV !== 'production') {
+            if ("production" !== 'production') {
               DOMProperty.getPossibleStandardName[attributeName] = propName;
             }
           }
@@ -8569,7 +7983,7 @@ $__System.registerDynamic("6a", ["6d", "49"], true, function($__require, exports
     var DOMProperty = {
       ID_ATTRIBUTE_NAME: 'data-reactid',
       properties: {},
-      getPossibleStandardName: process.env.NODE_ENV !== 'production' ? {} : null,
+      getPossibleStandardName: "production" !== 'production' ? {} : null,
       _isCustomAttributeFunctions: [],
       isCustomAttribute: function(attributeName) {
         for (var i = 0; i < DOMProperty._isCustomAttributeFunctions.length; i++) {
@@ -8595,19 +8009,18 @@ $__System.registerDynamic("6a", ["6d", "49"], true, function($__require, exports
       injection: DOMPropertyInjection
     };
     module.exports = DOMProperty;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("c1", ["6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("c3", ["6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var invariant = $__require('6d');
+    var invariant = $__require('6f');
     var EventPluginOrder = null;
     var namesToPlugins = {};
     function recomputePluginOrdering() {
@@ -8617,20 +8030,20 @@ $__System.registerDynamic("c1", ["6d", "49"], true, function($__require, exports
       for (var pluginName in namesToPlugins) {
         var PluginModule = namesToPlugins[pluginName];
         var pluginIndex = EventPluginOrder.indexOf(pluginName);
-        !(pluginIndex > -1) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'EventPluginRegistry: Cannot inject event plugins that do not exist in ' + 'the plugin ordering, `%s`.', pluginName) : invariant(false) : undefined;
+        !(pluginIndex > -1) ? "production" !== 'production' ? invariant(false, 'EventPluginRegistry: Cannot inject event plugins that do not exist in ' + 'the plugin ordering, `%s`.', pluginName) : invariant(false) : undefined;
         if (EventPluginRegistry.plugins[pluginIndex]) {
           continue;
         }
-        !PluginModule.extractEvents ? process.env.NODE_ENV !== 'production' ? invariant(false, 'EventPluginRegistry: Event plugins must implement an `extractEvents` ' + 'method, but `%s` does not.', pluginName) : invariant(false) : undefined;
+        !PluginModule.extractEvents ? "production" !== 'production' ? invariant(false, 'EventPluginRegistry: Event plugins must implement an `extractEvents` ' + 'method, but `%s` does not.', pluginName) : invariant(false) : undefined;
         EventPluginRegistry.plugins[pluginIndex] = PluginModule;
         var publishedEvents = PluginModule.eventTypes;
         for (var eventName in publishedEvents) {
-          !publishEventForPlugin(publishedEvents[eventName], PluginModule, eventName) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'EventPluginRegistry: Failed to publish event `%s` for plugin `%s`.', eventName, pluginName) : invariant(false) : undefined;
+          !publishEventForPlugin(publishedEvents[eventName], PluginModule, eventName) ? "production" !== 'production' ? invariant(false, 'EventPluginRegistry: Failed to publish event `%s` for plugin `%s`.', eventName, pluginName) : invariant(false) : undefined;
         }
       }
     }
     function publishEventForPlugin(dispatchConfig, PluginModule, eventName) {
-      !!EventPluginRegistry.eventNameDispatchConfigs.hasOwnProperty(eventName) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'EventPluginHub: More than one plugin attempted to publish the same ' + 'event name, `%s`.', eventName) : invariant(false) : undefined;
+      !!EventPluginRegistry.eventNameDispatchConfigs.hasOwnProperty(eventName) ? "production" !== 'production' ? invariant(false, 'EventPluginHub: More than one plugin attempted to publish the same ' + 'event name, `%s`.', eventName) : invariant(false) : undefined;
       EventPluginRegistry.eventNameDispatchConfigs[eventName] = dispatchConfig;
       var phasedRegistrationNames = dispatchConfig.phasedRegistrationNames;
       if (phasedRegistrationNames) {
@@ -8648,7 +8061,7 @@ $__System.registerDynamic("c1", ["6d", "49"], true, function($__require, exports
       return false;
     }
     function publishRegistrationName(registrationName, PluginModule, eventName) {
-      !!EventPluginRegistry.registrationNameModules[registrationName] ? process.env.NODE_ENV !== 'production' ? invariant(false, 'EventPluginHub: More than one plugin attempted to publish the same ' + 'registration name, `%s`.', registrationName) : invariant(false) : undefined;
+      !!EventPluginRegistry.registrationNameModules[registrationName] ? "production" !== 'production' ? invariant(false, 'EventPluginHub: More than one plugin attempted to publish the same ' + 'registration name, `%s`.', registrationName) : invariant(false) : undefined;
       EventPluginRegistry.registrationNameModules[registrationName] = PluginModule;
       EventPluginRegistry.registrationNameDependencies[registrationName] = PluginModule.eventTypes[eventName].dependencies;
     }
@@ -8658,7 +8071,7 @@ $__System.registerDynamic("c1", ["6d", "49"], true, function($__require, exports
       registrationNameModules: {},
       registrationNameDependencies: {},
       injectEventPluginOrder: function(InjectedEventPluginOrder) {
-        !!EventPluginOrder ? process.env.NODE_ENV !== 'production' ? invariant(false, 'EventPluginRegistry: Cannot inject event plugin ordering more than ' + 'once. You are likely trying to load more than one copy of React.') : invariant(false) : undefined;
+        !!EventPluginOrder ? "production" !== 'production' ? invariant(false, 'EventPluginRegistry: Cannot inject event plugin ordering more than ' + 'once. You are likely trying to load more than one copy of React.') : invariant(false) : undefined;
         EventPluginOrder = Array.prototype.slice.call(InjectedEventPluginOrder);
         recomputePluginOrdering();
       },
@@ -8670,7 +8083,7 @@ $__System.registerDynamic("c1", ["6d", "49"], true, function($__require, exports
           }
           var PluginModule = injectedNamesToPlugins[pluginName];
           if (!namesToPlugins.hasOwnProperty(pluginName) || namesToPlugins[pluginName] !== PluginModule) {
-            !!namesToPlugins[pluginName] ? process.env.NODE_ENV !== 'production' ? invariant(false, 'EventPluginRegistry: Cannot inject two different event plugins ' + 'using the same name, `%s`.', pluginName) : invariant(false) : undefined;
+            !!namesToPlugins[pluginName] ? "production" !== 'production' ? invariant(false, 'EventPluginRegistry: Cannot inject two different event plugins ' + 'using the same name, `%s`.', pluginName) : invariant(false) : undefined;
             namesToPlugins[pluginName] = PluginModule;
             isOrderingDirty = true;
           }
@@ -8718,18 +8131,17 @@ $__System.registerDynamic("c1", ["6d", "49"], true, function($__require, exports
       }
     };
     module.exports = EventPluginRegistry;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("5d", ["9b"], true, function($__require, exports, module) {
+$__System.registerDynamic("5f", ["9d"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var keyMirror = $__require('9b');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var keyMirror = $__require('9d');
   var PropagationPhases = keyMirror({
     bubbled: null,
     captured: null
@@ -8804,27 +8216,26 @@ $__System.registerDynamic("5d", ["9b"], true, function($__require, exports, modu
     PropagationPhases: PropagationPhases
   };
   module.exports = EventConstants;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("c2", ["5d", "c3", "6d", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("c4", ["5f", "c5", "6f", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var EventConstants = $__require('5d');
-    var ReactErrorUtils = $__require('c3');
-    var invariant = $__require('6d');
-    var warning = $__require('53');
+    var EventConstants = $__require('5f');
+    var ReactErrorUtils = $__require('c5');
+    var invariant = $__require('6f');
+    var warning = $__require('55');
     var injection = {
       Mount: null,
       injectMount: function(InjectedMount) {
         injection.Mount = InjectedMount;
-        if (process.env.NODE_ENV !== 'production') {
-          process.env.NODE_ENV !== 'production' ? warning(InjectedMount && InjectedMount.getNode && InjectedMount.getID, 'EventPluginUtils.injection.injectMount(...): Injected Mount ' + 'module is missing getNode or getID.') : undefined;
+        if ("production" !== 'production') {
+          "production" !== 'production' ? warning(InjectedMount && InjectedMount.getNode && InjectedMount.getID, 'EventPluginUtils.injection.injectMount(...): Injected Mount ' + 'module is missing getNode or getID.') : undefined;
         }
       }
     };
@@ -8839,7 +8250,7 @@ $__System.registerDynamic("c2", ["5d", "c3", "6d", "53", "49"], true, function($
       return topLevelType === topLevelTypes.topMouseDown || topLevelType === topLevelTypes.topTouchStart;
     }
     var validateEventDispatches;
-    if (process.env.NODE_ENV !== 'production') {
+    if ("production" !== 'production') {
       validateEventDispatches = function(event) {
         var dispatchListeners = event._dispatchListeners;
         var dispatchIDs = event._dispatchIDs;
@@ -8847,7 +8258,7 @@ $__System.registerDynamic("c2", ["5d", "c3", "6d", "53", "49"], true, function($
         var idsIsArr = Array.isArray(dispatchIDs);
         var IDsLen = idsIsArr ? dispatchIDs.length : dispatchIDs ? 1 : 0;
         var listenersLen = listenersIsArr ? dispatchListeners.length : dispatchListeners ? 1 : 0;
-        process.env.NODE_ENV !== 'production' ? warning(idsIsArr === listenersIsArr && IDsLen === listenersLen, 'EventPluginUtils: Invalid `event`.') : undefined;
+        "production" !== 'production' ? warning(idsIsArr === listenersIsArr && IDsLen === listenersLen, 'EventPluginUtils: Invalid `event`.') : undefined;
       };
     }
     function executeDispatch(event, simulated, listener, domID) {
@@ -8863,7 +8274,7 @@ $__System.registerDynamic("c2", ["5d", "c3", "6d", "53", "49"], true, function($
     function executeDispatchesInOrder(event, simulated) {
       var dispatchListeners = event._dispatchListeners;
       var dispatchIDs = event._dispatchIDs;
-      if (process.env.NODE_ENV !== 'production') {
+      if ("production" !== 'production') {
         validateEventDispatches(event);
       }
       if (Array.isArray(dispatchListeners)) {
@@ -8882,7 +8293,7 @@ $__System.registerDynamic("c2", ["5d", "c3", "6d", "53", "49"], true, function($
     function executeDispatchesInOrderStopAtTrueImpl(event) {
       var dispatchListeners = event._dispatchListeners;
       var dispatchIDs = event._dispatchIDs;
-      if (process.env.NODE_ENV !== 'production') {
+      if ("production" !== 'production') {
         validateEventDispatches(event);
       }
       if (Array.isArray(dispatchListeners)) {
@@ -8908,12 +8319,12 @@ $__System.registerDynamic("c2", ["5d", "c3", "6d", "53", "49"], true, function($
       return ret;
     }
     function executeDirectDispatch(event) {
-      if (process.env.NODE_ENV !== 'production') {
+      if ("production" !== 'production') {
         validateEventDispatches(event);
       }
       var dispatchListener = event._dispatchListeners;
       var dispatchID = event._dispatchIDs;
-      !!Array.isArray(dispatchListener) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'executeDirectDispatch(...): Invalid `event`.') : invariant(false) : undefined;
+      !!Array.isArray(dispatchListener) ? "production" !== 'production' ? invariant(false, 'executeDirectDispatch(...): Invalid `event`.') : invariant(false) : undefined;
       var res = dispatchListener ? dispatchListener(event, dispatchID) : null;
       event._dispatchListeners = null;
       event._dispatchIDs = null;
@@ -8939,16 +8350,15 @@ $__System.registerDynamic("c2", ["5d", "c3", "6d", "53", "49"], true, function($
       injection: injection
     };
     module.exports = EventPluginUtils;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("c3", ["49"], true, function($__require, exports, module) {
+$__System.registerDynamic("c5", ["54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
     var caughtError = null;
@@ -8973,7 +8383,7 @@ $__System.registerDynamic("c3", ["49"], true, function($__require, exports, modu
         }
       }
     };
-    if (process.env.NODE_ENV !== 'production') {
+    if ("production" !== 'production') {
       if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof document !== 'undefined' && typeof document.createEvent === 'function') {
         var fakeNode = document.createElement('react');
         ReactErrorUtils.invokeGuardedCallback = function(name, func, a, b) {
@@ -8988,21 +8398,20 @@ $__System.registerDynamic("c3", ["49"], true, function($__require, exports, modu
       }
     }
     module.exports = ReactErrorUtils;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("b1", ["6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("b3", ["6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var invariant = $__require('6d');
+    var invariant = $__require('6f');
     function accumulateInto(current, next) {
-      !(next != null) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'accumulateInto(...): Accumulated items must not be null or undefined.') : invariant(false) : undefined;
+      !(next != null) ? "production" !== 'production' ? invariant(false, 'accumulateInto(...): Accumulated items must not be null or undefined.') : invariant(false) : undefined;
       if (current == null) {
         return next;
       }
@@ -9022,17 +8431,16 @@ $__System.registerDynamic("b1", ["6d", "49"], true, function($__require, exports
       return [current, next];
     }
     module.exports = accumulateInto;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("b2", [], true, function($__require, exports, module) {
+$__System.registerDynamic("b4", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var forEachAccumulated = function(arr, cb, scope) {
     if (Array.isArray(arr)) {
       arr.forEach(cb, scope);
@@ -9041,24 +8449,23 @@ $__System.registerDynamic("b2", [], true, function($__require, exports, module) 
     }
   };
   module.exports = forEachAccumulated;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("61", ["c1", "c2", "c3", "b1", "b2", "6d", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("63", ["c3", "c4", "c5", "b3", "b4", "6f", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var EventPluginRegistry = $__require('c1');
-    var EventPluginUtils = $__require('c2');
-    var ReactErrorUtils = $__require('c3');
-    var accumulateInto = $__require('b1');
-    var forEachAccumulated = $__require('b2');
-    var invariant = $__require('6d');
-    var warning = $__require('53');
+    var EventPluginRegistry = $__require('c3');
+    var EventPluginUtils = $__require('c4');
+    var ReactErrorUtils = $__require('c5');
+    var accumulateInto = $__require('b3');
+    var forEachAccumulated = $__require('b4');
+    var invariant = $__require('6f');
+    var warning = $__require('55');
     var listenerBank = {};
     var eventQueue = null;
     var executeDispatchesAndRelease = function(event, simulated) {
@@ -9078,19 +8485,19 @@ $__System.registerDynamic("61", ["c1", "c2", "c3", "b1", "b2", "6d", "53", "49"]
     var InstanceHandle = null;
     function validateInstanceHandle() {
       var valid = InstanceHandle && InstanceHandle.traverseTwoPhase && InstanceHandle.traverseEnterLeave;
-      process.env.NODE_ENV !== 'production' ? warning(valid, 'InstanceHandle not injected before use!') : undefined;
+      "production" !== 'production' ? warning(valid, 'InstanceHandle not injected before use!') : undefined;
     }
     var EventPluginHub = {
       injection: {
         injectMount: EventPluginUtils.injection.injectMount,
         injectInstanceHandle: function(InjectedInstanceHandle) {
           InstanceHandle = InjectedInstanceHandle;
-          if (process.env.NODE_ENV !== 'production') {
+          if ("production" !== 'production') {
             validateInstanceHandle();
           }
         },
         getInstanceHandle: function() {
-          if (process.env.NODE_ENV !== 'production') {
+          if ("production" !== 'production') {
             validateInstanceHandle();
           }
           return InstanceHandle;
@@ -9101,7 +8508,7 @@ $__System.registerDynamic("61", ["c1", "c2", "c3", "b1", "b2", "6d", "53", "49"]
       eventNameDispatchConfigs: EventPluginRegistry.eventNameDispatchConfigs,
       registrationNameModules: EventPluginRegistry.registrationNameModules,
       putListener: function(id, registrationName, listener) {
-        !(typeof listener === 'function') ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Expected %s listener to be a function, instead got type %s', registrationName, typeof listener) : invariant(false) : undefined;
+        !(typeof listener === 'function') ? "production" !== 'production' ? invariant(false, 'Expected %s listener to be a function, instead got type %s', registrationName, typeof listener) : invariant(false) : undefined;
         var bankForRegistrationName = listenerBank[registrationName] || (listenerBank[registrationName] = {});
         bankForRegistrationName[id] = listener;
         var PluginModule = EventPluginRegistry.registrationNameModules[registrationName];
@@ -9162,7 +8569,7 @@ $__System.registerDynamic("61", ["c1", "c2", "c3", "b1", "b2", "6d", "53", "49"]
         } else {
           forEachAccumulated(processingEventQueue, executeDispatchesAndReleaseTopLevel);
         }
-        !!eventQueue ? process.env.NODE_ENV !== 'production' ? invariant(false, 'processEventQueue(): Additional events were enqueued while processing ' + 'an event queue. Support for this has not yet been implemented.') : invariant(false) : undefined;
+        !!eventQueue ? "production" !== 'production' ? invariant(false, 'processEventQueue(): Additional events were enqueued while processing ' + 'an event queue. Support for this has not yet been implemented.') : invariant(false) : undefined;
         ReactErrorUtils.rethrowCaughtError();
       },
       __purge: function() {
@@ -9173,18 +8580,17 @@ $__System.registerDynamic("61", ["c1", "c2", "c3", "b1", "b2", "6d", "53", "49"]
       }
     };
     module.exports = EventPluginHub;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("c4", ["61"], true, function($__require, exports, module) {
+$__System.registerDynamic("c6", ["63"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var EventPluginHub = $__require('61');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var EventPluginHub = $__require('63');
   function runEventQueueInBatch(events) {
     EventPluginHub.enqueueEvents(events);
     EventPluginHub.processEventQueue(false);
@@ -9194,16 +8600,15 @@ $__System.registerDynamic("c4", ["61"], true, function($__require, exports, modu
       runEventQueueInBatch(events);
     }};
   module.exports = ReactEventEmitterMixin;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("bc", [], true, function($__require, exports, module) {
+$__System.registerDynamic("be", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var ViewportMetrics = {
     currentScrollLeft: 0,
     currentScrollTop: 0,
@@ -9213,17 +8618,16 @@ $__System.registerDynamic("bc", [], true, function($__require, exports, module) 
     }
   };
   module.exports = ViewportMetrics;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("63", ["54"], true, function($__require, exports, module) {
+$__System.registerDynamic("65", ["56"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var ExecutionEnvironment = $__require('54');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var ExecutionEnvironment = $__require('56');
   var useHasFeature;
   if (ExecutionEnvironment.canUseDOM) {
     useHasFeature = document.implementation && document.implementation.hasFeature && document.implementation.hasFeature('', '') !== true;
@@ -9245,25 +8649,24 @@ $__System.registerDynamic("63", ["54"], true, function($__require, exports, modu
     return isSupported;
   }
   module.exports = isEventSupported;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("8c", ["5d", "61", "c1", "c4", "4e", "bc", "57", "63", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("8e", ["5f", "63", "c3", "c6", "4f", "be", "59", "65", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var EventConstants = $__require('5d');
-    var EventPluginHub = $__require('61');
-    var EventPluginRegistry = $__require('c1');
-    var ReactEventEmitterMixin = $__require('c4');
-    var ReactPerf = $__require('4e');
-    var ViewportMetrics = $__require('bc');
-    var assign = $__require('57');
-    var isEventSupported = $__require('63');
+    var EventConstants = $__require('5f');
+    var EventPluginHub = $__require('63');
+    var EventPluginRegistry = $__require('c3');
+    var ReactEventEmitterMixin = $__require('c6');
+    var ReactPerf = $__require('4f');
+    var ViewportMetrics = $__require('be');
+    var assign = $__require('59');
+    var isEventSupported = $__require('65');
     var alreadyListeningTo = {};
     var isMonitoringScrollValue = false;
     var reactTopListenersCounter = 0;
@@ -9415,59 +8818,55 @@ $__System.registerDynamic("8c", ["5d", "61", "c1", "c4", "4e", "bc", "57", "63",
       deleteListener: 'deleteListener'
     });
     module.exports = ReactBrowserEventEmitter;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("a8", [], true, function($__require, exports, module) {
+$__System.registerDynamic("aa", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var ReactDOMFeatureFlags = {useCreateElement: false};
   module.exports = ReactDOMFeatureFlags;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("c5", [], true, function($__require, exports, module) {
+$__System.registerDynamic("c7", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   function isNode(object) {
     return !!(object && (typeof Node === 'function' ? object instanceof Node : typeof object === 'object' && typeof object.nodeType === 'number' && typeof object.nodeName === 'string'));
   }
   module.exports = isNode;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("c6", ["c5"], true, function($__require, exports, module) {
+$__System.registerDynamic("c8", ["c7"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var isNode = $__require('c5');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var isNode = $__require('c7');
   function isTextNode(object) {
     return isNode(object) && object.nodeType == 3;
   }
   module.exports = isTextNode;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("ad", ["c6"], true, function($__require, exports, module) {
+$__System.registerDynamic("af", ["c8"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var isTextNode = $__require('c6');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var isTextNode = $__require('c8');
   function containsNode(_x, _x2) {
     var _again = true;
     _function: while (_again) {
@@ -9495,18 +8894,17 @@ $__System.registerDynamic("ad", ["c6"], true, function($__require, exports, modu
     }
   }
   module.exports = containsNode;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("91", ["54", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("93", ["56", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ExecutionEnvironment = $__require('54');
+    var ExecutionEnvironment = $__require('56');
     var WHITESPACE_TEST = /^[ \r\n\t\f]/;
     var NONVISIBLE_TEST = /<(!--|link|noscript|meta|script|style)[ \r\n\t\f\/>]/;
     var setInnerHTML = function(node, html) {
@@ -9542,23 +8940,22 @@ $__System.registerDynamic("91", ["54", "49"], true, function($__require, exports
       }
     }
     module.exports = setInnerHTML;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("94", ["57", "9a", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("95", ["59", "9c", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var assign = $__require('57');
-    var emptyFunction = $__require('9a');
-    var warning = $__require('53');
+    var assign = $__require('59');
+    var emptyFunction = $__require('9c');
+    var warning = $__require('55');
     var validateDOMNesting = emptyFunction;
-    if (process.env.NODE_ENV !== 'production') {
+    if ("production" !== 'production') {
       var specialTags = ['address', 'applet', 'area', 'article', 'aside', 'base', 'basefont', 'bgsound', 'blockquote', 'body', 'br', 'button', 'caption', 'center', 'col', 'colgroup', 'dd', 'details', 'dir', 'div', 'dl', 'dt', 'embed', 'fieldset', 'figcaption', 'figure', 'footer', 'form', 'frame', 'frameset', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'head', 'header', 'hgroup', 'hr', 'html', 'iframe', 'img', 'input', 'isindex', 'li', 'link', 'listing', 'main', 'marquee', 'menu', 'menuitem', 'meta', 'nav', 'noembed', 'noframes', 'noscript', 'object', 'ol', 'p', 'param', 'plaintext', 'pre', 'script', 'section', 'select', 'source', 'style', 'summary', 'table', 'tbody', 'td', 'template', 'textarea', 'tfoot', 'th', 'thead', 'title', 'tr', 'track', 'ul', 'wbr', 'xmp'];
       var inScopeTags = ['applet', 'caption', 'html', 'table', 'td', 'th', 'marquee', 'object', 'template', 'foreignObject', 'desc', 'title'];
       var buttonScopeTags = inScopeTags.concat(['button']);
@@ -9772,9 +9169,9 @@ $__System.registerDynamic("94", ["57", "9a", "53", "49"], true, function($__requ
             if (ancestorTag === 'table' && childTag === 'tr') {
               info += ' Add a <tbody> to your code to match the DOM tree generated by ' + 'the browser.';
             }
-            process.env.NODE_ENV !== 'production' ? warning(false, 'validateDOMNesting(...): <%s> cannot appear as a child of <%s>. ' + 'See %s.%s', childTag, ancestorTag, ownerInfo, info) : undefined;
+            "production" !== 'production' ? warning(false, 'validateDOMNesting(...): <%s> cannot appear as a child of <%s>. ' + 'See %s.%s', childTag, ancestorTag, ownerInfo, info) : undefined;
           } else {
-            process.env.NODE_ENV !== 'production' ? warning(false, 'validateDOMNesting(...): <%s> cannot appear as a descendant of ' + '<%s>. See %s.', childTag, ancestorTag, ownerInfo) : undefined;
+            "production" !== 'production' ? warning(false, 'validateDOMNesting(...): <%s> cannot appear as a descendant of ' + '<%s>. See %s.', childTag, ancestorTag, ownerInfo) : undefined;
           }
         }
       };
@@ -9788,40 +9185,39 @@ $__System.registerDynamic("94", ["57", "9a", "53", "49"], true, function($__requ
       };
     }
     module.exports = validateDOMNesting;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("48", ["6a", "8c", "4a", "a8", "c7", "c8", "4d", "6c", "c9", "4e", "4f", "8e", "50", "57", "ca", "ad", "83", "6d", "91", "84", "94", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("4a", ["6c", "8e", "4b", "aa", "c9", "ca", "4e", "6e", "cb", "4f", "50", "90", "51", "59", "cc", "af", "85", "6f", "93", "86", "95", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var DOMProperty = $__require('6a');
-    var ReactBrowserEventEmitter = $__require('8c');
-    var ReactCurrentOwner = $__require('4a');
-    var ReactDOMFeatureFlags = $__require('a8');
-    var ReactElement = $__require('c7');
-    var ReactEmptyComponentRegistry = $__require('c8');
-    var ReactInstanceHandles = $__require('4d');
-    var ReactInstanceMap = $__require('6c');
-    var ReactMarkupChecksum = $__require('c9');
-    var ReactPerf = $__require('4e');
-    var ReactReconciler = $__require('4f');
-    var ReactUpdateQueue = $__require('8e');
-    var ReactUpdates = $__require('50');
-    var assign = $__require('57');
-    var emptyObject = $__require('ca');
-    var containsNode = $__require('ad');
-    var instantiateReactComponent = $__require('83');
-    var invariant = $__require('6d');
-    var setInnerHTML = $__require('91');
-    var shouldUpdateReactComponent = $__require('84');
-    var validateDOMNesting = $__require('94');
-    var warning = $__require('53');
+    var DOMProperty = $__require('6c');
+    var ReactBrowserEventEmitter = $__require('8e');
+    var ReactCurrentOwner = $__require('4b');
+    var ReactDOMFeatureFlags = $__require('aa');
+    var ReactElement = $__require('c9');
+    var ReactEmptyComponentRegistry = $__require('ca');
+    var ReactInstanceHandles = $__require('4e');
+    var ReactInstanceMap = $__require('6e');
+    var ReactMarkupChecksum = $__require('cb');
+    var ReactPerf = $__require('4f');
+    var ReactReconciler = $__require('50');
+    var ReactUpdateQueue = $__require('90');
+    var ReactUpdates = $__require('51');
+    var assign = $__require('59');
+    var emptyObject = $__require('cc');
+    var containsNode = $__require('af');
+    var instantiateReactComponent = $__require('85');
+    var invariant = $__require('6f');
+    var setInnerHTML = $__require('93');
+    var shouldUpdateReactComponent = $__require('86');
+    var validateDOMNesting = $__require('95');
+    var warning = $__require('55');
     var ATTR_NAME = DOMProperty.ID_ATTRIBUTE_NAME;
     var nodeCache = {};
     var ELEMENT_NODE_TYPE = 1;
@@ -9830,7 +9226,7 @@ $__System.registerDynamic("48", ["6a", "8c", "4a", "a8", "c7", "c8", "4d", "6c",
     var ownerDocumentContextKey = '__ReactMount_ownerDocument$' + Math.random().toString(36).slice(2);
     var instancesByReactRootID = {};
     var containersByReactRootID = {};
-    if (process.env.NODE_ENV !== 'production') {
+    if ("production" !== 'production') {
       var rootElementsByReactRootID = {};
     }
     var findComponentRootReusableArray = [];
@@ -9863,7 +9259,7 @@ $__System.registerDynamic("48", ["6a", "8c", "4a", "a8", "c7", "c8", "4d", "6c",
         if (nodeCache.hasOwnProperty(id)) {
           var cached = nodeCache[id];
           if (cached !== node) {
-            !!isValid(cached, id) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'ReactMount: Two valid but unequal nodes with the same `%s`: %s', ATTR_NAME, id) : invariant(false) : undefined;
+            !!isValid(cached, id) ? "production" !== 'production' ? invariant(false, 'ReactMount: Two valid but unequal nodes with the same `%s`: %s', ATTR_NAME, id) : invariant(false) : undefined;
             nodeCache[id] = node;
           }
         } else {
@@ -9901,7 +9297,7 @@ $__System.registerDynamic("48", ["6a", "8c", "4a", "a8", "c7", "c8", "4d", "6c",
     }
     function isValid(node, id) {
       if (node) {
-        !(internalGetID(node) === id) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'ReactMount: Unexpected modification of `%s`', ATTR_NAME) : invariant(false) : undefined;
+        !(internalGetID(node) === id) ? "production" !== 'production' ? invariant(false, 'ReactMount: Unexpected modification of `%s`', ATTR_NAME) : invariant(false) : undefined;
         var container = ReactMount.findReactContainerForID(id);
         if (container && containsNode(container, node)) {
           return true;
@@ -9937,7 +9333,7 @@ $__System.registerDynamic("48", ["6a", "8c", "4a", "a8", "c7", "c8", "4d", "6c",
           context[ownerDocumentContextKey] = container.ownerDocument;
         }
       }
-      if (process.env.NODE_ENV !== 'production') {
+      if ("production" !== 'production') {
         if (context === emptyObject) {
           context = {};
         }
@@ -9993,7 +9389,7 @@ $__System.registerDynamic("48", ["6a", "8c", "4a", "a8", "c7", "c8", "4d", "6c",
     }
     var TopLevelWrapper = function() {};
     TopLevelWrapper.prototype.isReactComponent = {};
-    if (process.env.NODE_ENV !== 'production') {
+    if ("production" !== 'production') {
       TopLevelWrapper.displayName = 'TopLevelWrapper';
     }
     TopLevelWrapper.prototype.render = function() {
@@ -10012,35 +9408,35 @@ $__System.registerDynamic("48", ["6a", "8c", "4a", "a8", "c7", "c8", "4d", "6c",
             ReactUpdateQueue.enqueueCallbackInternal(prevComponent, callback);
           }
         });
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           rootElementsByReactRootID[getReactRootID(container)] = getReactRootElementInContainer(container);
         }
         return prevComponent;
       },
       _registerComponent: function(nextComponent, container) {
-        !(container && (container.nodeType === ELEMENT_NODE_TYPE || container.nodeType === DOC_NODE_TYPE || container.nodeType === DOCUMENT_FRAGMENT_NODE_TYPE)) ? process.env.NODE_ENV !== 'production' ? invariant(false, '_registerComponent(...): Target container is not a DOM element.') : invariant(false) : undefined;
+        !(container && (container.nodeType === ELEMENT_NODE_TYPE || container.nodeType === DOC_NODE_TYPE || container.nodeType === DOCUMENT_FRAGMENT_NODE_TYPE)) ? "production" !== 'production' ? invariant(false, '_registerComponent(...): Target container is not a DOM element.') : invariant(false) : undefined;
         ReactBrowserEventEmitter.ensureScrollValueMonitoring();
         var reactRootID = ReactMount.registerContainer(container);
         instancesByReactRootID[reactRootID] = nextComponent;
         return reactRootID;
       },
       _renderNewRootComponent: function(nextElement, container, shouldReuseMarkup, context) {
-        process.env.NODE_ENV !== 'production' ? warning(ReactCurrentOwner.current == null, '_renderNewRootComponent(): Render methods should be a pure function ' + 'of props and state; triggering nested component updates from ' + 'render is not allowed. If necessary, trigger nested updates in ' + 'componentDidUpdate. Check the render method of %s.', ReactCurrentOwner.current && ReactCurrentOwner.current.getName() || 'ReactCompositeComponent') : undefined;
+        "production" !== 'production' ? warning(ReactCurrentOwner.current == null, '_renderNewRootComponent(): Render methods should be a pure function ' + 'of props and state; triggering nested component updates from ' + 'render is not allowed. If necessary, trigger nested updates in ' + 'componentDidUpdate. Check the render method of %s.', ReactCurrentOwner.current && ReactCurrentOwner.current.getName() || 'ReactCompositeComponent') : undefined;
         var componentInstance = instantiateReactComponent(nextElement, null);
         var reactRootID = ReactMount._registerComponent(componentInstance, container);
         ReactUpdates.batchedUpdates(batchedMountComponentIntoNode, componentInstance, reactRootID, container, shouldReuseMarkup, context);
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           rootElementsByReactRootID[reactRootID] = getReactRootElementInContainer(container);
         }
         return componentInstance;
       },
       renderSubtreeIntoContainer: function(parentComponent, nextElement, container, callback) {
-        !(parentComponent != null && parentComponent._reactInternalInstance != null) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'parentComponent must be a valid React Component') : invariant(false) : undefined;
+        !(parentComponent != null && parentComponent._reactInternalInstance != null) ? "production" !== 'production' ? invariant(false, 'parentComponent must be a valid React Component') : invariant(false) : undefined;
         return ReactMount._renderSubtreeIntoContainer(parentComponent, nextElement, container, callback);
       },
       _renderSubtreeIntoContainer: function(parentComponent, nextElement, container, callback) {
-        !ReactElement.isValidElement(nextElement) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'ReactDOM.render(): Invalid component element.%s', typeof nextElement === 'string' ? ' Instead of passing an element string, make sure to instantiate ' + 'it by passing it to React.createElement.' : typeof nextElement === 'function' ? ' Instead of passing a component class, make sure to instantiate ' + 'it by passing it to React.createElement.' : nextElement != null && nextElement.props !== undefined ? ' This may be caused by unintentionally loading two independent ' + 'copies of React.' : '') : invariant(false) : undefined;
-        process.env.NODE_ENV !== 'production' ? warning(!container || !container.tagName || container.tagName.toUpperCase() !== 'BODY', 'render(): Rendering components directly into document.body is ' + 'discouraged, since its children are often manipulated by third-party ' + 'scripts and browser extensions. This may lead to subtle ' + 'reconciliation issues. Try rendering into a container element created ' + 'for your app.') : undefined;
+        !ReactElement.isValidElement(nextElement) ? "production" !== 'production' ? invariant(false, 'ReactDOM.render(): Invalid component element.%s', typeof nextElement === 'string' ? ' Instead of passing an element string, make sure to instantiate ' + 'it by passing it to React.createElement.' : typeof nextElement === 'function' ? ' Instead of passing a component class, make sure to instantiate ' + 'it by passing it to React.createElement.' : nextElement != null && nextElement.props !== undefined ? ' This may be caused by unintentionally loading two independent ' + 'copies of React.' : '') : invariant(false) : undefined;
+        "production" !== 'production' ? warning(!container || !container.tagName || container.tagName.toUpperCase() !== 'BODY', 'render(): Rendering components directly into document.body is ' + 'discouraged, since its children are often manipulated by third-party ' + 'scripts and browser extensions. This may lead to subtle ' + 'reconciliation issues. Try rendering into a container element created ' + 'for your app.') : undefined;
         var nextWrappedElement = new ReactElement(TopLevelWrapper, null, null, null, null, null, nextElement);
         var prevComponent = instancesByReactRootID[getReactRootID(container)];
         if (prevComponent) {
@@ -10060,13 +9456,13 @@ $__System.registerDynamic("48", ["6a", "8c", "4a", "a8", "c7", "c8", "4d", "6c",
         var reactRootElement = getReactRootElementInContainer(container);
         var containerHasReactMarkup = reactRootElement && !!internalGetID(reactRootElement);
         var containerHasNonRootReactChild = hasNonRootReactChild(container);
-        if (process.env.NODE_ENV !== 'production') {
-          process.env.NODE_ENV !== 'production' ? warning(!containerHasNonRootReactChild, 'render(...): Replacing React-rendered children with a new root ' + 'component. If you intended to update the children of this node, ' + 'you should instead have the existing children update their state ' + 'and render the new components instead of calling ReactDOM.render.') : undefined;
+        if ("production" !== 'production') {
+          "production" !== 'production' ? warning(!containerHasNonRootReactChild, 'render(...): Replacing React-rendered children with a new root ' + 'component. If you intended to update the children of this node, ' + 'you should instead have the existing children update their state ' + 'and render the new components instead of calling ReactDOM.render.') : undefined;
           if (!containerHasReactMarkup || reactRootElement.nextSibling) {
             var rootElementSibling = reactRootElement;
             while (rootElementSibling) {
               if (internalGetID(rootElementSibling)) {
-                process.env.NODE_ENV !== 'production' ? warning(false, 'render(): Target node has markup rendered by React, but there ' + 'are unrelated nodes as well. This is most commonly caused by ' + 'white-space inserted around server-rendered markup.') : undefined;
+                "production" !== 'production' ? warning(false, 'render(): Target node has markup rendered by React, but there ' + 'are unrelated nodes as well. This is most commonly caused by ' + 'white-space inserted around server-rendered markup.') : undefined;
                 break;
               }
               rootElementSibling = rootElementSibling.nextSibling;
@@ -10095,23 +9491,23 @@ $__System.registerDynamic("48", ["6a", "8c", "4a", "a8", "c7", "c8", "4d", "6c",
         return reactRootID;
       },
       unmountComponentAtNode: function(container) {
-        process.env.NODE_ENV !== 'production' ? warning(ReactCurrentOwner.current == null, 'unmountComponentAtNode(): Render methods should be a pure function ' + 'of props and state; triggering nested component updates from render ' + 'is not allowed. If necessary, trigger nested updates in ' + 'componentDidUpdate. Check the render method of %s.', ReactCurrentOwner.current && ReactCurrentOwner.current.getName() || 'ReactCompositeComponent') : undefined;
-        !(container && (container.nodeType === ELEMENT_NODE_TYPE || container.nodeType === DOC_NODE_TYPE || container.nodeType === DOCUMENT_FRAGMENT_NODE_TYPE)) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'unmountComponentAtNode(...): Target container is not a DOM element.') : invariant(false) : undefined;
+        "production" !== 'production' ? warning(ReactCurrentOwner.current == null, 'unmountComponentAtNode(): Render methods should be a pure function ' + 'of props and state; triggering nested component updates from render ' + 'is not allowed. If necessary, trigger nested updates in ' + 'componentDidUpdate. Check the render method of %s.', ReactCurrentOwner.current && ReactCurrentOwner.current.getName() || 'ReactCompositeComponent') : undefined;
+        !(container && (container.nodeType === ELEMENT_NODE_TYPE || container.nodeType === DOC_NODE_TYPE || container.nodeType === DOCUMENT_FRAGMENT_NODE_TYPE)) ? "production" !== 'production' ? invariant(false, 'unmountComponentAtNode(...): Target container is not a DOM element.') : invariant(false) : undefined;
         var reactRootID = getReactRootID(container);
         var component = instancesByReactRootID[reactRootID];
         if (!component) {
           var containerHasNonRootReactChild = hasNonRootReactChild(container);
           var containerID = internalGetID(container);
           var isContainerReactRoot = containerID && containerID === ReactInstanceHandles.getReactRootIDFromNodeID(containerID);
-          if (process.env.NODE_ENV !== 'production') {
-            process.env.NODE_ENV !== 'production' ? warning(!containerHasNonRootReactChild, 'unmountComponentAtNode(): The node you\'re attempting to unmount ' + 'was rendered by React and is not a top-level container. %s', isContainerReactRoot ? 'You may have accidentally passed in a React root node instead ' + 'of its container.' : 'Instead, have the parent component update its state and ' + 'rerender in order to remove this component.') : undefined;
+          if ("production" !== 'production') {
+            "production" !== 'production' ? warning(!containerHasNonRootReactChild, 'unmountComponentAtNode(): The node you\'re attempting to unmount ' + 'was rendered by React and is not a top-level container. %s', isContainerReactRoot ? 'You may have accidentally passed in a React root node instead ' + 'of its container.' : 'Instead, have the parent component update its state and ' + 'rerender in order to remove this component.') : undefined;
           }
           return false;
         }
         ReactUpdates.batchedUpdates(unmountComponentFromNode, component, container);
         delete instancesByReactRootID[reactRootID];
         delete containersByReactRootID[reactRootID];
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           delete rootElementsByReactRootID[reactRootID];
         }
         return true;
@@ -10119,15 +9515,15 @@ $__System.registerDynamic("48", ["6a", "8c", "4a", "a8", "c7", "c8", "4d", "6c",
       findReactContainerForID: function(id) {
         var reactRootID = ReactInstanceHandles.getReactRootIDFromNodeID(id);
         var container = containersByReactRootID[reactRootID];
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           var rootElement = rootElementsByReactRootID[reactRootID];
           if (rootElement && rootElement.parentNode !== container) {
-            process.env.NODE_ENV !== 'production' ? warning(internalGetID(rootElement) === reactRootID, 'ReactMount: Root element ID differed from reactRootID.') : undefined;
+            "production" !== 'production' ? warning(internalGetID(rootElement) === reactRootID, 'ReactMount: Root element ID differed from reactRootID.') : undefined;
             var containerChild = container.firstChild;
             if (containerChild && reactRootID === internalGetID(containerChild)) {
               rootElementsByReactRootID[reactRootID] = containerChild;
             } else {
-              process.env.NODE_ENV !== 'production' ? warning(false, 'ReactMount: Root element has been removed from its original ' + 'container. New container: %s', rootElement.parentNode) : undefined;
+              "production" !== 'production' ? warning(false, 'ReactMount: Root element has been removed from its original ' + 'container. New container: %s', rootElement.parentNode) : undefined;
             }
           }
         }
@@ -10144,8 +9540,8 @@ $__System.registerDynamic("48", ["6a", "8c", "4a", "a8", "c7", "c8", "4d", "6c",
         var firstChildren = findComponentRootReusableArray;
         var childIndex = 0;
         var deepestAncestor = findDeepestCachedAncestor(targetID) || ancestorNode;
-        if (process.env.NODE_ENV !== 'production') {
-          process.env.NODE_ENV !== 'production' ? warning(deepestAncestor != null, 'React can\'t find the root component node for data-reactid value ' + '`%s`. If you\'re seeing this message, it probably means that ' + 'you\'ve loaded two copies of React on the page. At this time, only ' + 'a single copy of React can be loaded at a time.', targetID) : undefined;
+        if ("production" !== 'production') {
+          "production" !== 'production' ? warning(deepestAncestor != null, 'React can\'t find the root component node for data-reactid value ' + '`%s`. If you\'re seeing this message, it probably means that ' + 'you\'ve loaded two copies of React on the page. At this time, only ' + 'a single copy of React can be loaded at a time.', targetID) : undefined;
         }
         firstChildren[0] = deepestAncestor.firstChild;
         firstChildren.length = 1;
@@ -10172,10 +9568,10 @@ $__System.registerDynamic("48", ["6a", "8c", "4a", "a8", "c7", "c8", "4d", "6c",
           }
         }
         firstChildren.length = 0;
-        !false ? process.env.NODE_ENV !== 'production' ? invariant(false, 'findComponentRoot(..., %s): Unable to find element. This probably ' + 'means the DOM was unexpectedly mutated (e.g., by the browser), ' + 'usually due to forgetting a <tbody> when using tables, nesting tags ' + 'like <form>, <p>, or <a>, or using non-SVG elements in an <svg> ' + 'parent. ' + 'Try inspecting the child nodes of the element with React ID `%s`.', targetID, ReactMount.getID(ancestorNode)) : invariant(false) : undefined;
+        !false ? "production" !== 'production' ? invariant(false, 'findComponentRoot(..., %s): Unable to find element. This probably ' + 'means the DOM was unexpectedly mutated (e.g., by the browser), ' + 'usually due to forgetting a <tbody> when using tables, nesting tags ' + 'like <form>, <p>, or <a>, or using non-SVG elements in an <svg> ' + 'parent. ' + 'Try inspecting the child nodes of the element with React ID `%s`.', targetID, ReactMount.getID(ancestorNode)) : invariant(false) : undefined;
       },
       _mountImageIntoNode: function(markup, container, shouldReuseMarkup, transaction) {
-        !(container && (container.nodeType === ELEMENT_NODE_TYPE || container.nodeType === DOC_NODE_TYPE || container.nodeType === DOCUMENT_FRAGMENT_NODE_TYPE)) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'mountComponentIntoNode(...): Target container is not valid.') : invariant(false) : undefined;
+        !(container && (container.nodeType === ELEMENT_NODE_TYPE || container.nodeType === DOC_NODE_TYPE || container.nodeType === DOCUMENT_FRAGMENT_NODE_TYPE)) ? "production" !== 'production' ? invariant(false, 'mountComponentIntoNode(...): Target container is not valid.') : invariant(false) : undefined;
         if (shouldReuseMarkup) {
           var rootElement = getReactRootElementInContainer(container);
           if (ReactMarkupChecksum.canReuseMarkup(markup, rootElement)) {
@@ -10186,7 +9582,7 @@ $__System.registerDynamic("48", ["6a", "8c", "4a", "a8", "c7", "c8", "4d", "6c",
             var rootMarkup = rootElement.outerHTML;
             rootElement.setAttribute(ReactMarkupChecksum.CHECKSUM_ATTR_NAME, checksum);
             var normalizedMarkup = markup;
-            if (process.env.NODE_ENV !== 'production') {
+            if ("production" !== 'production') {
               var normalizer;
               if (container.nodeType === ELEMENT_NODE_TYPE) {
                 normalizer = document.createElement('div');
@@ -10202,13 +9598,13 @@ $__System.registerDynamic("48", ["6a", "8c", "4a", "a8", "c7", "c8", "4d", "6c",
             }
             var diffIndex = firstDifferenceIndex(normalizedMarkup, rootMarkup);
             var difference = ' (client) ' + normalizedMarkup.substring(diffIndex - 20, diffIndex + 20) + '\n (server) ' + rootMarkup.substring(diffIndex - 20, diffIndex + 20);
-            !(container.nodeType !== DOC_NODE_TYPE) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'You\'re trying to render a component to the document using ' + 'server rendering but the checksum was invalid. This usually ' + 'means you rendered a different component type or props on ' + 'the client from the one on the server, or your render() ' + 'methods are impure. React cannot handle this case due to ' + 'cross-browser quirks by rendering at the document root. You ' + 'should look for environment dependent code in your components ' + 'and ensure the props are the same client and server side:\n%s', difference) : invariant(false) : undefined;
-            if (process.env.NODE_ENV !== 'production') {
-              process.env.NODE_ENV !== 'production' ? warning(false, 'React attempted to reuse markup in a container but the ' + 'checksum was invalid. This generally means that you are ' + 'using server rendering and the markup generated on the ' + 'server was not what the client was expecting. React injected ' + 'new markup to compensate which works but you have lost many ' + 'of the benefits of server rendering. Instead, figure out ' + 'why the markup being generated is different on the client ' + 'or server:\n%s', difference) : undefined;
+            !(container.nodeType !== DOC_NODE_TYPE) ? "production" !== 'production' ? invariant(false, 'You\'re trying to render a component to the document using ' + 'server rendering but the checksum was invalid. This usually ' + 'means you rendered a different component type or props on ' + 'the client from the one on the server, or your render() ' + 'methods are impure. React cannot handle this case due to ' + 'cross-browser quirks by rendering at the document root. You ' + 'should look for environment dependent code in your components ' + 'and ensure the props are the same client and server side:\n%s', difference) : invariant(false) : undefined;
+            if ("production" !== 'production') {
+              "production" !== 'production' ? warning(false, 'React attempted to reuse markup in a container but the ' + 'checksum was invalid. This generally means that you are ' + 'using server rendering and the markup generated on the ' + 'server was not what the client was expecting. React injected ' + 'new markup to compensate which works but you have lost many ' + 'of the benefits of server rendering. Instead, figure out ' + 'why the markup being generated is different on the client ' + 'or server:\n%s', difference) : undefined;
             }
           }
         }
-        !(container.nodeType !== DOC_NODE_TYPE) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'You\'re trying to render a component to the document but ' + 'you didn\'t use server rendering. We can\'t do this ' + 'without using server rendering due to cross-browser quirks. ' + 'See ReactDOMServer.renderToString() for server rendering.') : invariant(false) : undefined;
+        !(container.nodeType !== DOC_NODE_TYPE) ? "production" !== 'production' ? invariant(false, 'You\'re trying to render a component to the document but ' + 'you didn\'t use server rendering. We can\'t do this ' + 'without using server rendering due to cross-browser quirks. ' + 'See ReactDOMServer.renderToString() for server rendering.') : invariant(false) : undefined;
         if (transaction.useCreateElement) {
           while (container.lastChild) {
             container.removeChild(container.lastChild);
@@ -10232,17 +9628,16 @@ $__System.registerDynamic("48", ["6a", "8c", "4a", "a8", "c7", "c8", "4d", "6c",
       _mountImageIntoNode: '_mountImageIntoNode'
     });
     module.exports = ReactMount;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("54", [], true, function($__require, exports, module) {
+$__System.registerDynamic("56", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var canUseDOM = !!(typeof window !== 'undefined' && window.document && window.document.createElement);
   var ExecutionEnvironment = {
     canUseDOM: canUseDOM,
@@ -10252,33 +9647,31 @@ $__System.registerDynamic("54", [], true, function($__require, exports, module) 
     isInWorker: !canUseDOM
   };
   module.exports = ExecutionEnvironment;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("cb", ["54"], true, function($__require, exports, module) {
+$__System.registerDynamic("cd", ["56"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var ExecutionEnvironment = $__require('54');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var ExecutionEnvironment = $__require('56');
   var performance;
   if (ExecutionEnvironment.canUseDOM) {
     performance = window.performance || window.msPerformance || window.webkitPerformance;
   }
   module.exports = performance || {};
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("cc", ["cb"], true, function($__require, exports, module) {
+$__System.registerDynamic("ce", ["cd"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var performance = $__require('cb');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var performance = $__require('cd');
   var performanceNow;
   if (performance.now) {
     performanceNow = function() {
@@ -10290,21 +9683,20 @@ $__System.registerDynamic("cc", ["cb"], true, function($__require, exports, modu
     };
   }
   module.exports = performanceNow;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("cd", ["6a", "c0", "48", "4e", "cc"], true, function($__require, exports, module) {
+$__System.registerDynamic("cf", ["6c", "c2", "4a", "4f", "ce"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var DOMProperty = $__require('6a');
-  var ReactDefaultPerfAnalysis = $__require('c0');
-  var ReactMount = $__require('48');
-  var ReactPerf = $__require('4e');
-  var performanceNow = $__require('cc');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var DOMProperty = $__require('6c');
+  var ReactDefaultPerfAnalysis = $__require('c2');
+  var ReactMount = $__require('4a');
+  var ReactPerf = $__require('4f');
+  var performanceNow = $__require('ce');
   function roundFloat(val) {
     return Math.floor(val * 100) / 100;
   }
@@ -10488,38 +9880,37 @@ $__System.registerDynamic("cd", ["6a", "c0", "48", "4e", "cc"], true, function($
     }
   };
   module.exports = ReactDefaultPerf;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("4c", ["5c", "60", "65", "66", "67", "54", "69", "6b", "8d", "ce", "8a", "4b", "9f", "a1", "4d", "48", "a6", "af", "b0", "be", "bf", "cd", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("4d", ["5e", "62", "67", "68", "69", "56", "6b", "6d", "8f", "d0", "8c", "4c", "a1", "a3", "4e", "4a", "a8", "b1", "b2", "c0", "c1", "cf", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var BeforeInputEventPlugin = $__require('5c');
-    var ChangeEventPlugin = $__require('60');
-    var ClientReactRootIndex = $__require('65');
-    var DefaultEventPluginOrder = $__require('66');
-    var EnterLeaveEventPlugin = $__require('67');
-    var ExecutionEnvironment = $__require('54');
-    var HTMLDOMPropertyConfig = $__require('69');
-    var ReactBrowserComponentMixin = $__require('6b');
-    var ReactComponentBrowserEnvironment = $__require('8d');
-    var ReactDefaultBatchingStrategy = $__require('ce');
-    var ReactDOMComponent = $__require('8a');
-    var ReactDOMTextComponent = $__require('4b');
-    var ReactEventListener = $__require('9f');
-    var ReactInjection = $__require('a1');
-    var ReactInstanceHandles = $__require('4d');
-    var ReactMount = $__require('48');
-    var ReactReconcileTransaction = $__require('a6');
-    var SelectEventPlugin = $__require('af');
-    var ServerReactRootIndex = $__require('b0');
-    var SimpleEventPlugin = $__require('be');
-    var SVGDOMPropertyConfig = $__require('bf');
+    var BeforeInputEventPlugin = $__require('5e');
+    var ChangeEventPlugin = $__require('62');
+    var ClientReactRootIndex = $__require('67');
+    var DefaultEventPluginOrder = $__require('68');
+    var EnterLeaveEventPlugin = $__require('69');
+    var ExecutionEnvironment = $__require('56');
+    var HTMLDOMPropertyConfig = $__require('6b');
+    var ReactBrowserComponentMixin = $__require('6d');
+    var ReactComponentBrowserEnvironment = $__require('8f');
+    var ReactDefaultBatchingStrategy = $__require('d0');
+    var ReactDOMComponent = $__require('8c');
+    var ReactDOMTextComponent = $__require('4c');
+    var ReactEventListener = $__require('a1');
+    var ReactInjection = $__require('a3');
+    var ReactInstanceHandles = $__require('4e');
+    var ReactMount = $__require('4a');
+    var ReactReconcileTransaction = $__require('a8');
+    var SelectEventPlugin = $__require('b1');
+    var ServerReactRootIndex = $__require('b2');
+    var SimpleEventPlugin = $__require('c0');
+    var SVGDOMPropertyConfig = $__require('c1');
     var alreadyInjected = false;
     function inject() {
       if (alreadyInjected) {
@@ -10547,30 +9938,29 @@ $__System.registerDynamic("4c", ["5c", "60", "65", "66", "67", "54", "69", "6b",
       ReactInjection.Updates.injectBatchingStrategy(ReactDefaultBatchingStrategy);
       ReactInjection.RootIndex.injectCreateReactRootIndex(ExecutionEnvironment.canUseDOM ? ClientReactRootIndex.createReactRootIndex : ServerReactRootIndex.createReactRootIndex);
       ReactInjection.Component.injectEnvironment(ReactComponentBrowserEnvironment);
-      if (process.env.NODE_ENV !== 'production') {
+      if ("production" !== 'production') {
         var url = ExecutionEnvironment.canUseDOM && window.location.href || '';
         if (/[?&]react_perf\b/.test(url)) {
-          var ReactDefaultPerf = $__require('cd');
+          var ReactDefaultPerf = $__require('cf');
           ReactDefaultPerf.start();
         }
       }
     }
     module.exports = {inject: inject};
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("ce", ["50", "aa", "57", "9a"], true, function($__require, exports, module) {
+$__System.registerDynamic("d0", ["51", "ac", "59", "9c"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var ReactUpdates = $__require('50');
-  var Transaction = $__require('aa');
-  var assign = $__require('57');
-  var emptyFunction = $__require('9a');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var ReactUpdates = $__require('51');
+  var Transaction = $__require('ac');
+  var assign = $__require('59');
+  var emptyFunction = $__require('9c');
   var RESET_BATCHED_UPDATES = {
     initialize: emptyFunction,
     close: function() {
@@ -10602,16 +9992,15 @@ $__System.registerDynamic("ce", ["50", "aa", "57", "9a"], true, function($__requ
     }
   };
   module.exports = ReactDefaultBatchingStrategy;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("cf", [], true, function($__require, exports, module) {
+$__System.registerDynamic("d1", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var MOD = 65521;
   function adler32(data) {
     var a = 1;
@@ -10634,17 +10023,16 @@ $__System.registerDynamic("cf", [], true, function($__require, exports, module) 
     return a | b << 16;
   }
   module.exports = adler32;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("c9", ["cf"], true, function($__require, exports, module) {
+$__System.registerDynamic("cb", ["d1"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var adler32 = $__require('cf');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var adler32 = $__require('d1');
   var TAG_END = /\/?>/;
   var ReactMarkupChecksum = {
     CHECKSUM_ATTR_NAME: 'data-react-checksum',
@@ -10660,36 +10048,34 @@ $__System.registerDynamic("c9", ["cf"], true, function($__require, exports, modu
     }
   };
   module.exports = ReactMarkupChecksum;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("d0", [], true, function($__require, exports, module) {
+$__System.registerDynamic("d2", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var ReactServerBatchingStrategy = {
     isBatchingUpdates: false,
     batchedUpdates: function(callback) {}
   };
   module.exports = ReactServerBatchingStrategy;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("d1", ["56", "a7", "aa", "57", "9a"], true, function($__require, exports, module) {
+$__System.registerDynamic("d3", ["58", "a9", "ac", "59", "9c"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var PooledClass = $__require('56');
-  var CallbackQueue = $__require('a7');
-  var Transaction = $__require('aa');
-  var assign = $__require('57');
-  var emptyFunction = $__require('9a');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var PooledClass = $__require('58');
+  var CallbackQueue = $__require('a9');
+  var Transaction = $__require('ac');
+  var assign = $__require('59');
+  var emptyFunction = $__require('9c');
   var ON_DOM_READY_QUEUEING = {
     initialize: function() {
       this.reactMountReady.reset();
@@ -10718,25 +10104,24 @@ $__System.registerDynamic("d1", ["56", "a7", "aa", "57", "9a"], true, function($
   assign(ReactServerRenderingTransaction.prototype, Transaction.Mixin, Mixin);
   PooledClass.addPoolingTo(ReactServerRenderingTransaction);
   module.exports = ReactServerRenderingTransaction;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("88", ["6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("8a", ["6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var invariant = $__require('6d');
+    var invariant = $__require('6f');
     var injected = false;
     var ReactComponentEnvironment = {
       unmountIDFromEnvironment: null,
       replaceNodeWithMarkupByID: null,
       processChildrenUpdates: null,
       injection: {injectEnvironment: function(environment) {
-          !!injected ? process.env.NODE_ENV !== 'production' ? invariant(false, 'ReactCompositeComponent: injectEnvironment() can only be called once.') : invariant(false) : undefined;
+          !!injected ? "production" !== 'production' ? invariant(false, 'ReactCompositeComponent: injectEnvironment() can only be called once.') : invariant(false) : undefined;
           ReactComponentEnvironment.unmountIDFromEnvironment = environment.unmountIDFromEnvironment;
           ReactComponentEnvironment.replaceNodeWithMarkupByID = environment.replaceNodeWithMarkupByID;
           ReactComponentEnvironment.processChildrenUpdates = environment.processChildrenUpdates;
@@ -10744,17 +10129,16 @@ $__System.registerDynamic("88", ["6d", "49"], true, function($__require, exports
         }}
     };
     module.exports = ReactComponentEnvironment;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("6c", [], true, function($__require, exports, module) {
+$__System.registerDynamic("6e", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var ReactInstanceMap = {
     remove: function(key) {
       key._reactInternalInstance = undefined;
@@ -10770,20 +10154,19 @@ $__System.registerDynamic("6c", [], true, function($__require, exports, module) 
     }
   };
   module.exports = ReactInstanceMap;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("a7", ["56", "57", "6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("a9", ["58", "59", "6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var PooledClass = $__require('56');
-    var assign = $__require('57');
-    var invariant = $__require('6d');
+    var PooledClass = $__require('58');
+    var assign = $__require('59');
+    var invariant = $__require('6f');
     function CallbackQueue() {
       this._callbacks = null;
       this._contexts = null;
@@ -10799,7 +10182,7 @@ $__System.registerDynamic("a7", ["56", "57", "6d", "49"], true, function($__requ
         var callbacks = this._callbacks;
         var contexts = this._contexts;
         if (callbacks) {
-          !(callbacks.length === contexts.length) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Mismatched list of contexts in callback queue') : invariant(false) : undefined;
+          !(callbacks.length === contexts.length) ? "production" !== 'production' ? invariant(false, 'Mismatched list of contexts in callback queue') : invariant(false) : undefined;
           this._callbacks = null;
           this._contexts = null;
           for (var i = 0; i < callbacks.length; i++) {
@@ -10819,23 +10202,22 @@ $__System.registerDynamic("a7", ["56", "57", "6d", "49"], true, function($__requ
     });
     PooledClass.addPoolingTo(CallbackQueue);
     module.exports = CallbackQueue;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("4e", ["49"], true, function($__require, exports, module) {
+$__System.registerDynamic("4f", ["54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
     var ReactPerf = {
       enableMeasure: false,
       storedMeasure: _noMeasure,
       measureMethods: function(object, objectName, methodNames) {
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           for (var key in methodNames) {
             if (!methodNames.hasOwnProperty(key)) {
               continue;
@@ -10845,7 +10227,7 @@ $__System.registerDynamic("4e", ["49"], true, function($__require, exports, modu
         }
       },
       measure: function(objName, fnName, func) {
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           var measuredFunc = null;
           var wrapper = function() {
             if (ReactPerf.enableMeasure) {
@@ -10869,19 +10251,18 @@ $__System.registerDynamic("4e", ["49"], true, function($__require, exports, modu
       return func;
     }
     module.exports = ReactPerf;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("aa", ["6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("ac", ["6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var invariant = $__require('6d');
+    var invariant = $__require('6f');
     var Mixin = {
       reinitializeTransaction: function() {
         this.transactionWrappers = this.getTransactionWrappers();
@@ -10898,7 +10279,7 @@ $__System.registerDynamic("aa", ["6d", "49"], true, function($__require, exports
         return !!this._isInTransaction;
       },
       perform: function(method, scope, a, b, c, d, e, f) {
-        !!this.isInTransaction() ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Transaction.perform(...): Cannot initialize a transaction when there ' + 'is already an outstanding transaction.') : invariant(false) : undefined;
+        !!this.isInTransaction() ? "production" !== 'production' ? invariant(false, 'Transaction.perform(...): Cannot initialize a transaction when there ' + 'is already an outstanding transaction.') : invariant(false) : undefined;
         var errorThrown;
         var ret;
         try {
@@ -10939,7 +10320,7 @@ $__System.registerDynamic("aa", ["6d", "49"], true, function($__require, exports
         }
       },
       closeAll: function(startIndex) {
-        !this.isInTransaction() ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Transaction.closeAll(): Cannot close transaction when none are open.') : invariant(false) : undefined;
+        !this.isInTransaction() ? "production" !== 'production' ? invariant(false, 'Transaction.closeAll(): Cannot close transaction when none are open.') : invariant(false) : undefined;
         var transactionWrappers = this.transactionWrappers;
         for (var i = startIndex; i < transactionWrappers.length; i++) {
           var wrapper = transactionWrappers[i];
@@ -10967,31 +10348,30 @@ $__System.registerDynamic("aa", ["6d", "49"], true, function($__require, exports
       OBSERVED_ERROR: {}
     };
     module.exports = Transaction;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("50", ["a7", "56", "4e", "4f", "aa", "57", "6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("51", ["a9", "58", "4f", "50", "ac", "59", "6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var CallbackQueue = $__require('a7');
-    var PooledClass = $__require('56');
-    var ReactPerf = $__require('4e');
-    var ReactReconciler = $__require('4f');
-    var Transaction = $__require('aa');
-    var assign = $__require('57');
-    var invariant = $__require('6d');
+    var CallbackQueue = $__require('a9');
+    var PooledClass = $__require('58');
+    var ReactPerf = $__require('4f');
+    var ReactReconciler = $__require('50');
+    var Transaction = $__require('ac');
+    var assign = $__require('59');
+    var invariant = $__require('6f');
     var dirtyComponents = [];
     var asapCallbackQueue = CallbackQueue.getPooled();
     var asapEnqueued = false;
     var batchingStrategy = null;
     function ensureInjected() {
-      !(ReactUpdates.ReactReconcileTransaction && batchingStrategy) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'ReactUpdates: must inject a reconcile transaction class and batching ' + 'strategy') : invariant(false) : undefined;
+      !(ReactUpdates.ReactReconcileTransaction && batchingStrategy) ? "production" !== 'production' ? invariant(false, 'ReactUpdates: must inject a reconcile transaction class and batching ' + 'strategy') : invariant(false) : undefined;
     }
     var NESTED_UPDATES = {
       initialize: function() {
@@ -11046,7 +10426,7 @@ $__System.registerDynamic("50", ["a7", "56", "4e", "4f", "aa", "57", "6d", "49"]
     }
     function runBatchedUpdates(transaction) {
       var len = transaction.dirtyComponentsLength;
-      !(len === dirtyComponents.length) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Expected flush transaction\'s stored dirty-components length (%s) to ' + 'match dirty-components array length (%s).', len, dirtyComponents.length) : invariant(false) : undefined;
+      !(len === dirtyComponents.length) ? "production" !== 'production' ? invariant(false, 'Expected flush transaction\'s stored dirty-components length (%s) to ' + 'match dirty-components array length (%s).', len, dirtyComponents.length) : invariant(false) : undefined;
       dirtyComponents.sort(mountOrderComparator);
       for (var i = 0; i < len; i++) {
         var component = dirtyComponents[i];
@@ -11086,19 +10466,19 @@ $__System.registerDynamic("50", ["a7", "56", "4e", "4f", "aa", "57", "6d", "49"]
       dirtyComponents.push(component);
     }
     function asap(callback, context) {
-      !batchingStrategy.isBatchingUpdates ? process.env.NODE_ENV !== 'production' ? invariant(false, 'ReactUpdates.asap: Can\'t enqueue an asap callback in a context where' + 'updates are not being batched.') : invariant(false) : undefined;
+      !batchingStrategy.isBatchingUpdates ? "production" !== 'production' ? invariant(false, 'ReactUpdates.asap: Can\'t enqueue an asap callback in a context where' + 'updates are not being batched.') : invariant(false) : undefined;
       asapCallbackQueue.enqueue(callback, context);
       asapEnqueued = true;
     }
     var ReactUpdatesInjection = {
       injectReconcileTransaction: function(ReconcileTransaction) {
-        !ReconcileTransaction ? process.env.NODE_ENV !== 'production' ? invariant(false, 'ReactUpdates: must provide a reconcile transaction class') : invariant(false) : undefined;
+        !ReconcileTransaction ? "production" !== 'production' ? invariant(false, 'ReactUpdates: must provide a reconcile transaction class') : invariant(false) : undefined;
         ReactUpdates.ReactReconcileTransaction = ReconcileTransaction;
       },
       injectBatchingStrategy: function(_batchingStrategy) {
-        !_batchingStrategy ? process.env.NODE_ENV !== 'production' ? invariant(false, 'ReactUpdates: must provide a batching strategy') : invariant(false) : undefined;
-        !(typeof _batchingStrategy.batchedUpdates === 'function') ? process.env.NODE_ENV !== 'production' ? invariant(false, 'ReactUpdates: must provide a batchedUpdates() function') : invariant(false) : undefined;
-        !(typeof _batchingStrategy.isBatchingUpdates === 'boolean') ? process.env.NODE_ENV !== 'production' ? invariant(false, 'ReactUpdates: must provide an isBatchingUpdates boolean attribute') : invariant(false) : undefined;
+        !_batchingStrategy ? "production" !== 'production' ? invariant(false, 'ReactUpdates: must provide a batching strategy') : invariant(false) : undefined;
+        !(typeof _batchingStrategy.batchedUpdates === 'function') ? "production" !== 'production' ? invariant(false, 'ReactUpdates: must provide a batchedUpdates() function') : invariant(false) : undefined;
+        !(typeof _batchingStrategy.isBatchingUpdates === 'boolean') ? "production" !== 'production' ? invariant(false, 'ReactUpdates: must provide an isBatchingUpdates boolean attribute') : invariant(false) : undefined;
         batchingStrategy = _batchingStrategy;
       }
     };
@@ -11111,47 +10491,46 @@ $__System.registerDynamic("50", ["a7", "56", "4e", "4f", "aa", "57", "6d", "49"]
       asap: asap
     };
     module.exports = ReactUpdates;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("8e", ["4a", "c7", "6c", "50", "57", "6d", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("90", ["4b", "c9", "6e", "51", "59", "6f", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactCurrentOwner = $__require('4a');
-    var ReactElement = $__require('c7');
-    var ReactInstanceMap = $__require('6c');
-    var ReactUpdates = $__require('50');
-    var assign = $__require('57');
-    var invariant = $__require('6d');
-    var warning = $__require('53');
+    var ReactCurrentOwner = $__require('4b');
+    var ReactElement = $__require('c9');
+    var ReactInstanceMap = $__require('6e');
+    var ReactUpdates = $__require('51');
+    var assign = $__require('59');
+    var invariant = $__require('6f');
+    var warning = $__require('55');
     function enqueueUpdate(internalInstance) {
       ReactUpdates.enqueueUpdate(internalInstance);
     }
     function getInternalInstanceReadyForUpdate(publicInstance, callerName) {
       var internalInstance = ReactInstanceMap.get(publicInstance);
       if (!internalInstance) {
-        if (process.env.NODE_ENV !== 'production') {
-          process.env.NODE_ENV !== 'production' ? warning(!callerName, '%s(...): Can only update a mounted or mounting component. ' + 'This usually means you called %s() on an unmounted component. ' + 'This is a no-op. Please check the code for the %s component.', callerName, callerName, publicInstance.constructor.displayName) : undefined;
+        if ("production" !== 'production') {
+          "production" !== 'production' ? warning(!callerName, '%s(...): Can only update a mounted or mounting component. ' + 'This usually means you called %s() on an unmounted component. ' + 'This is a no-op. Please check the code for the %s component.', callerName, callerName, publicInstance.constructor.displayName) : undefined;
         }
         return null;
       }
-      if (process.env.NODE_ENV !== 'production') {
-        process.env.NODE_ENV !== 'production' ? warning(ReactCurrentOwner.current == null, '%s(...): Cannot update during an existing state transition ' + '(such as within `render`). Render methods should be a pure function ' + 'of props and state.', callerName) : undefined;
+      if ("production" !== 'production') {
+        "production" !== 'production' ? warning(ReactCurrentOwner.current == null, '%s(...): Cannot update during an existing state transition ' + '(such as within `render`). Render methods should be a pure function ' + 'of props and state.', callerName) : undefined;
       }
       return internalInstance;
     }
     var ReactUpdateQueue = {
       isMounted: function(publicInstance) {
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           var owner = ReactCurrentOwner.current;
           if (owner !== null) {
-            process.env.NODE_ENV !== 'production' ? warning(owner._warnedAboutRefsInRender, '%s is accessing isMounted inside its render() function. ' + 'render() should be a pure function of props and state. It should ' + 'never access something that requires stale data from the previous ' + 'render, such as refs. Move this logic to componentDidMount and ' + 'componentDidUpdate instead.', owner.getName() || 'A component') : undefined;
+            "production" !== 'production' ? warning(owner._warnedAboutRefsInRender, '%s is accessing isMounted inside its render() function. ' + 'render() should be a pure function of props and state. It should ' + 'never access something that requires stale data from the previous ' + 'render, such as refs. Move this logic to componentDidMount and ' + 'componentDidUpdate instead.', owner.getName() || 'A component') : undefined;
             owner._warnedAboutRefsInRender = true;
           }
         }
@@ -11163,7 +10542,7 @@ $__System.registerDynamic("8e", ["4a", "c7", "6c", "50", "57", "6d", "53", "49"]
         }
       },
       enqueueCallback: function(publicInstance, callback) {
-        !(typeof callback === 'function') ? process.env.NODE_ENV !== 'production' ? invariant(false, 'enqueueCallback(...): You called `setProps`, `replaceProps`, ' + '`setState`, `replaceState`, or `forceUpdate` with a callback that ' + 'isn\'t callable.') : invariant(false) : undefined;
+        !(typeof callback === 'function') ? "production" !== 'production' ? invariant(false, 'enqueueCallback(...): You called `setProps`, `replaceProps`, ' + '`setState`, `replaceState`, or `forceUpdate` with a callback that ' + 'isn\'t callable.') : invariant(false) : undefined;
         var internalInstance = getInternalInstanceReadyForUpdate(publicInstance);
         if (!internalInstance) {
           return null;
@@ -11176,7 +10555,7 @@ $__System.registerDynamic("8e", ["4a", "c7", "6c", "50", "57", "6d", "53", "49"]
         enqueueUpdate(internalInstance);
       },
       enqueueCallbackInternal: function(internalInstance, callback) {
-        !(typeof callback === 'function') ? process.env.NODE_ENV !== 'production' ? invariant(false, 'enqueueCallback(...): You called `setProps`, `replaceProps`, ' + '`setState`, `replaceState`, or `forceUpdate` with a callback that ' + 'isn\'t callable.') : invariant(false) : undefined;
+        !(typeof callback === 'function') ? "production" !== 'production' ? invariant(false, 'enqueueCallback(...): You called `setProps`, `replaceProps`, ' + '`setState`, `replaceState`, or `forceUpdate` with a callback that ' + 'isn\'t callable.') : invariant(false) : undefined;
         if (internalInstance._pendingCallbacks) {
           internalInstance._pendingCallbacks.push(callback);
         } else {
@@ -11219,7 +10598,7 @@ $__System.registerDynamic("8e", ["4a", "c7", "6c", "50", "57", "6d", "53", "49"]
       },
       enqueueSetPropsInternal: function(internalInstance, partialProps) {
         var topLevelWrapper = internalInstance._topLevelWrapper;
-        !topLevelWrapper ? process.env.NODE_ENV !== 'production' ? invariant(false, 'setProps(...): You called `setProps` on a ' + 'component with a parent. This is an anti-pattern since props will ' + 'get reactively updated when rendered. Instead, change the owner\'s ' + '`render` method to pass the correct value as props to the component ' + 'where it is created.') : invariant(false) : undefined;
+        !topLevelWrapper ? "production" !== 'production' ? invariant(false, 'setProps(...): You called `setProps` on a ' + 'component with a parent. This is an anti-pattern since props will ' + 'get reactively updated when rendered. Instead, change the owner\'s ' + '`render` method to pass the correct value as props to the component ' + 'where it is created.') : invariant(false) : undefined;
         var wrapElement = topLevelWrapper._pendingElement || topLevelWrapper._currentElement;
         var element = wrapElement.props;
         var props = assign({}, element.props, partialProps);
@@ -11235,7 +10614,7 @@ $__System.registerDynamic("8e", ["4a", "c7", "6c", "50", "57", "6d", "53", "49"]
       },
       enqueueReplacePropsInternal: function(internalInstance, props) {
         var topLevelWrapper = internalInstance._topLevelWrapper;
-        !topLevelWrapper ? process.env.NODE_ENV !== 'production' ? invariant(false, 'replaceProps(...): You called `replaceProps` on a ' + 'component with a parent. This is an anti-pattern since props will ' + 'get reactively updated when rendered. Instead, change the owner\'s ' + '`render` method to pass the correct value as props to the component ' + 'where it is created.') : invariant(false) : undefined;
+        !topLevelWrapper ? "production" !== 'production' ? invariant(false, 'replaceProps(...): You called `replaceProps` on a ' + 'component with a parent. This is an anti-pattern since props will ' + 'get reactively updated when rendered. Instead, change the owner\'s ' + '`render` method to pass the correct value as props to the component ' + 'where it is created.') : invariant(false) : undefined;
         var wrapElement = topLevelWrapper._pendingElement || topLevelWrapper._currentElement;
         var element = wrapElement.props;
         topLevelWrapper._pendingElement = ReactElement.cloneAndReplaceProps(wrapElement, ReactElement.cloneAndReplaceProps(element, props));
@@ -11247,17 +10626,16 @@ $__System.registerDynamic("8e", ["4a", "c7", "6c", "50", "57", "6d", "53", "49"]
       }
     };
     module.exports = ReactUpdateQueue;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("84", [], true, function($__require, exports, module) {
+$__System.registerDynamic("86", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   function shouldUpdateReactComponent(prevElement, nextElement) {
     var prevEmpty = prevElement === null || prevElement === false;
     var nextEmpty = nextElement === null || nextElement === false;
@@ -11274,31 +10652,30 @@ $__System.registerDynamic("84", [], true, function($__require, exports, module) 
     return false;
   }
   module.exports = shouldUpdateReactComponent;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("d2", ["88", "4a", "c7", "6c", "4e", "80", "d3", "4f", "8e", "57", "ca", "6d", "84", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("d4", ["8a", "4b", "c9", "6e", "4f", "82", "d5", "50", "90", "59", "cc", "6f", "86", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactComponentEnvironment = $__require('88');
-    var ReactCurrentOwner = $__require('4a');
-    var ReactElement = $__require('c7');
-    var ReactInstanceMap = $__require('6c');
-    var ReactPerf = $__require('4e');
-    var ReactPropTypeLocations = $__require('80');
-    var ReactPropTypeLocationNames = $__require('d3');
-    var ReactReconciler = $__require('4f');
-    var ReactUpdateQueue = $__require('8e');
-    var assign = $__require('57');
-    var emptyObject = $__require('ca');
-    var invariant = $__require('6d');
-    var shouldUpdateReactComponent = $__require('84');
-    var warning = $__require('53');
+    var ReactComponentEnvironment = $__require('8a');
+    var ReactCurrentOwner = $__require('4b');
+    var ReactElement = $__require('c9');
+    var ReactInstanceMap = $__require('6e');
+    var ReactPerf = $__require('4f');
+    var ReactPropTypeLocations = $__require('82');
+    var ReactPropTypeLocationNames = $__require('d5');
+    var ReactReconciler = $__require('50');
+    var ReactUpdateQueue = $__require('90');
+    var assign = $__require('59');
+    var emptyObject = $__require('cc');
+    var invariant = $__require('6f');
+    var shouldUpdateReactComponent = $__require('86');
+    var warning = $__require('55');
     function getDeclarationErrorAddendum(component) {
       var owner = component._currentElement._owner || null;
       if (owner) {
@@ -11341,7 +10718,7 @@ $__System.registerDynamic("d2", ["88", "4a", "c7", "6c", "4e", "80", "d3", "4f",
         var renderedElement;
         var canInstantiate = ('prototype' in Component);
         if (canInstantiate) {
-          if (process.env.NODE_ENV !== 'production') {
+          if ("production" !== 'production') {
             ReactCurrentOwner.current = this;
             try {
               inst = new Component(publicProps, publicContext, ReactUpdateQueue);
@@ -11356,11 +10733,11 @@ $__System.registerDynamic("d2", ["88", "4a", "c7", "6c", "4e", "80", "d3", "4f",
           renderedElement = inst;
           inst = new StatelessComponent(Component);
         }
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           if (inst.render == null) {
-            process.env.NODE_ENV !== 'production' ? warning(false, '%s(...): No `render` method found on the returned component ' + 'instance: you may have forgotten to define `render`, returned ' + 'null/false from a stateless component, or tried to render an ' + 'element whose type is a function that isn\'t a React component.', Component.displayName || Component.name || 'Component') : undefined;
+            "production" !== 'production' ? warning(false, '%s(...): No `render` method found on the returned component ' + 'instance: you may have forgotten to define `render`, returned ' + 'null/false from a stateless component, or tried to render an ' + 'element whose type is a function that isn\'t a React component.', Component.displayName || Component.name || 'Component') : undefined;
           } else {
-            process.env.NODE_ENV !== 'production' ? warning(Component.prototype && Component.prototype.isReactComponent || !canInstantiate || !(inst instanceof Component), '%s(...): React component classes must extend React.Component.', Component.displayName || Component.name || 'Component') : undefined;
+            "production" !== 'production' ? warning(Component.prototype && Component.prototype.isReactComponent || !canInstantiate || !(inst instanceof Component), '%s(...): React component classes must extend React.Component.', Component.displayName || Component.name || 'Component') : undefined;
           }
         }
         inst.props = publicProps;
@@ -11369,20 +10746,20 @@ $__System.registerDynamic("d2", ["88", "4a", "c7", "6c", "4e", "80", "d3", "4f",
         inst.updater = ReactUpdateQueue;
         this._instance = inst;
         ReactInstanceMap.set(inst, this);
-        if (process.env.NODE_ENV !== 'production') {
-          process.env.NODE_ENV !== 'production' ? warning(!inst.getInitialState || inst.getInitialState.isReactClassApproved, 'getInitialState was defined on %s, a plain JavaScript class. ' + 'This is only supported for classes created using React.createClass. ' + 'Did you mean to define a state property instead?', this.getName() || 'a component') : undefined;
-          process.env.NODE_ENV !== 'production' ? warning(!inst.getDefaultProps || inst.getDefaultProps.isReactClassApproved, 'getDefaultProps was defined on %s, a plain JavaScript class. ' + 'This is only supported for classes created using React.createClass. ' + 'Use a static property to define defaultProps instead.', this.getName() || 'a component') : undefined;
-          process.env.NODE_ENV !== 'production' ? warning(!inst.propTypes, 'propTypes was defined as an instance property on %s. Use a static ' + 'property to define propTypes instead.', this.getName() || 'a component') : undefined;
-          process.env.NODE_ENV !== 'production' ? warning(!inst.contextTypes, 'contextTypes was defined as an instance property on %s. Use a ' + 'static property to define contextTypes instead.', this.getName() || 'a component') : undefined;
-          process.env.NODE_ENV !== 'production' ? warning(typeof inst.componentShouldUpdate !== 'function', '%s has a method called ' + 'componentShouldUpdate(). Did you mean shouldComponentUpdate()? ' + 'The name is phrased as a question because the function is ' + 'expected to return a value.', this.getName() || 'A component') : undefined;
-          process.env.NODE_ENV !== 'production' ? warning(typeof inst.componentDidUnmount !== 'function', '%s has a method called ' + 'componentDidUnmount(). But there is no such lifecycle method. ' + 'Did you mean componentWillUnmount()?', this.getName() || 'A component') : undefined;
-          process.env.NODE_ENV !== 'production' ? warning(typeof inst.componentWillRecieveProps !== 'function', '%s has a method called ' + 'componentWillRecieveProps(). Did you mean componentWillReceiveProps()?', this.getName() || 'A component') : undefined;
+        if ("production" !== 'production') {
+          "production" !== 'production' ? warning(!inst.getInitialState || inst.getInitialState.isReactClassApproved, 'getInitialState was defined on %s, a plain JavaScript class. ' + 'This is only supported for classes created using React.createClass. ' + 'Did you mean to define a state property instead?', this.getName() || 'a component') : undefined;
+          "production" !== 'production' ? warning(!inst.getDefaultProps || inst.getDefaultProps.isReactClassApproved, 'getDefaultProps was defined on %s, a plain JavaScript class. ' + 'This is only supported for classes created using React.createClass. ' + 'Use a static property to define defaultProps instead.', this.getName() || 'a component') : undefined;
+          "production" !== 'production' ? warning(!inst.propTypes, 'propTypes was defined as an instance property on %s. Use a static ' + 'property to define propTypes instead.', this.getName() || 'a component') : undefined;
+          "production" !== 'production' ? warning(!inst.contextTypes, 'contextTypes was defined as an instance property on %s. Use a ' + 'static property to define contextTypes instead.', this.getName() || 'a component') : undefined;
+          "production" !== 'production' ? warning(typeof inst.componentShouldUpdate !== 'function', '%s has a method called ' + 'componentShouldUpdate(). Did you mean shouldComponentUpdate()? ' + 'The name is phrased as a question because the function is ' + 'expected to return a value.', this.getName() || 'A component') : undefined;
+          "production" !== 'production' ? warning(typeof inst.componentDidUnmount !== 'function', '%s has a method called ' + 'componentDidUnmount(). But there is no such lifecycle method. ' + 'Did you mean componentWillUnmount()?', this.getName() || 'A component') : undefined;
+          "production" !== 'production' ? warning(typeof inst.componentWillRecieveProps !== 'function', '%s has a method called ' + 'componentWillRecieveProps(). Did you mean componentWillReceiveProps()?', this.getName() || 'A component') : undefined;
         }
         var initialState = inst.state;
         if (initialState === undefined) {
           inst.state = initialState = null;
         }
-        !(typeof initialState === 'object' && !Array.isArray(initialState)) ? process.env.NODE_ENV !== 'production' ? invariant(false, '%s.state: must be set to an object or null', this.getName() || 'ReactCompositeComponent') : invariant(false) : undefined;
+        !(typeof initialState === 'object' && !Array.isArray(initialState)) ? "production" !== 'production' ? invariant(false, '%s.state: must be set to an object or null', this.getName() || 'ReactCompositeComponent') : invariant(false) : undefined;
         this._pendingStateQueue = null;
         this._pendingReplaceState = false;
         this._pendingForceUpdate = false;
@@ -11435,7 +10812,7 @@ $__System.registerDynamic("d2", ["88", "4a", "c7", "6c", "4e", "80", "d3", "4f",
       },
       _processContext: function(context) {
         var maskedContext = this._maskContext(context);
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           var Component = this._currentElement.type;
           if (Component.contextTypes) {
             this._checkPropTypes(Component.contextTypes, maskedContext, ReactPropTypeLocations.context);
@@ -11448,19 +10825,19 @@ $__System.registerDynamic("d2", ["88", "4a", "c7", "6c", "4e", "80", "d3", "4f",
         var inst = this._instance;
         var childContext = inst.getChildContext && inst.getChildContext();
         if (childContext) {
-          !(typeof Component.childContextTypes === 'object') ? process.env.NODE_ENV !== 'production' ? invariant(false, '%s.getChildContext(): childContextTypes must be defined in order to ' + 'use getChildContext().', this.getName() || 'ReactCompositeComponent') : invariant(false) : undefined;
-          if (process.env.NODE_ENV !== 'production') {
+          !(typeof Component.childContextTypes === 'object') ? "production" !== 'production' ? invariant(false, '%s.getChildContext(): childContextTypes must be defined in order to ' + 'use getChildContext().', this.getName() || 'ReactCompositeComponent') : invariant(false) : undefined;
+          if ("production" !== 'production') {
             this._checkPropTypes(Component.childContextTypes, childContext, ReactPropTypeLocations.childContext);
           }
           for (var name in childContext) {
-            !(name in Component.childContextTypes) ? process.env.NODE_ENV !== 'production' ? invariant(false, '%s.getChildContext(): key "%s" is not defined in childContextTypes.', this.getName() || 'ReactCompositeComponent', name) : invariant(false) : undefined;
+            !(name in Component.childContextTypes) ? "production" !== 'production' ? invariant(false, '%s.getChildContext(): key "%s" is not defined in childContextTypes.', this.getName() || 'ReactCompositeComponent', name) : invariant(false) : undefined;
           }
           return assign({}, currentContext, childContext);
         }
         return currentContext;
       },
       _processProps: function(newProps) {
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           var Component = this._currentElement.type;
           if (Component.propTypes) {
             this._checkPropTypes(Component.propTypes, newProps, ReactPropTypeLocations.prop);
@@ -11474,7 +10851,7 @@ $__System.registerDynamic("d2", ["88", "4a", "c7", "6c", "4e", "80", "d3", "4f",
           if (propTypes.hasOwnProperty(propName)) {
             var error;
             try {
-              !(typeof propTypes[propName] === 'function') ? process.env.NODE_ENV !== 'production' ? invariant(false, '%s: %s type `%s` is invalid; it must be a function, usually ' + 'from React.PropTypes.', componentName || 'React class', ReactPropTypeLocationNames[location], propName) : invariant(false) : undefined;
+              !(typeof propTypes[propName] === 'function') ? "production" !== 'production' ? invariant(false, '%s: %s type `%s` is invalid; it must be a function, usually ' + 'from React.PropTypes.', componentName || 'React class', ReactPropTypeLocationNames[location], propName) : invariant(false) : undefined;
               error = propTypes[propName](props, propName, componentName, location);
             } catch (ex) {
               error = ex;
@@ -11482,9 +10859,9 @@ $__System.registerDynamic("d2", ["88", "4a", "c7", "6c", "4e", "80", "d3", "4f",
             if (error instanceof Error) {
               var addendum = getDeclarationErrorAddendum(this);
               if (location === ReactPropTypeLocations.prop) {
-                process.env.NODE_ENV !== 'production' ? warning(false, 'Failed Composite propType: %s%s', error.message, addendum) : undefined;
+                "production" !== 'production' ? warning(false, 'Failed Composite propType: %s%s', error.message, addendum) : undefined;
               } else {
-                process.env.NODE_ENV !== 'production' ? warning(false, 'Failed Context Types: %s%s', error.message, addendum) : undefined;
+                "production" !== 'production' ? warning(false, 'Failed Context Types: %s%s', error.message, addendum) : undefined;
               }
             }
           }
@@ -11518,8 +10895,8 @@ $__System.registerDynamic("d2", ["88", "4a", "c7", "6c", "4e", "80", "d3", "4f",
         }
         var nextState = this._processPendingState(nextProps, nextContext);
         var shouldUpdate = this._pendingForceUpdate || !inst.shouldComponentUpdate || inst.shouldComponentUpdate(nextProps, nextState, nextContext);
-        if (process.env.NODE_ENV !== 'production') {
-          process.env.NODE_ENV !== 'production' ? warning(typeof shouldUpdate !== 'undefined', '%s.shouldComponentUpdate(): Returned undefined instead of a ' + 'boolean value. Make sure to return true or false.', this.getName() || 'ReactCompositeComponent') : undefined;
+        if ("production" !== 'production') {
+          "production" !== 'production' ? warning(typeof shouldUpdate !== 'undefined', '%s.shouldComponentUpdate(): Returned undefined instead of a ' + 'boolean value. Make sure to return true or false.', this.getName() || 'ReactCompositeComponent') : undefined;
         }
         if (shouldUpdate) {
           this._pendingForceUpdate = false;
@@ -11596,7 +10973,7 @@ $__System.registerDynamic("d2", ["88", "4a", "c7", "6c", "4e", "80", "d3", "4f",
       _renderValidatedComponentWithoutOwnerOrContext: function() {
         var inst = this._instance;
         var renderedComponent = inst.render();
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           if (typeof renderedComponent === 'undefined' && inst.render._isMockFunction) {
             renderedComponent = null;
           }
@@ -11611,16 +10988,16 @@ $__System.registerDynamic("d2", ["88", "4a", "c7", "6c", "4e", "80", "d3", "4f",
         } finally {
           ReactCurrentOwner.current = null;
         }
-        !(renderedComponent === null || renderedComponent === false || ReactElement.isValidElement(renderedComponent)) ? process.env.NODE_ENV !== 'production' ? invariant(false, '%s.render(): A valid ReactComponent must be returned. You may have ' + 'returned undefined, an array or some other invalid object.', this.getName() || 'ReactCompositeComponent') : invariant(false) : undefined;
+        !(renderedComponent === null || renderedComponent === false || ReactElement.isValidElement(renderedComponent)) ? "production" !== 'production' ? invariant(false, '%s.render(): A valid ReactComponent must be returned. You may have ' + 'returned undefined, an array or some other invalid object.', this.getName() || 'ReactCompositeComponent') : invariant(false) : undefined;
         return renderedComponent;
       },
       attachRef: function(ref, component) {
         var inst = this.getPublicInstance();
-        !(inst != null) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Stateless function components cannot have refs.') : invariant(false) : undefined;
+        !(inst != null) ? "production" !== 'production' ? invariant(false, 'Stateless function components cannot have refs.') : invariant(false) : undefined;
         var publicComponentInstance = component.getPublicInstance();
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           var componentName = component && component.getName ? component.getName() : 'a component';
-          process.env.NODE_ENV !== 'production' ? warning(publicComponentInstance != null, 'Stateless function components cannot be given refs ' + '(See ref "%s" in %s created by %s). ' + 'Attempts to access this ref will fail.', ref, componentName, this.getName()) : undefined;
+          "production" !== 'production' ? warning(publicComponentInstance != null, 'Stateless function components cannot be given refs ' + '(See ref "%s" in %s created by %s). ' + 'Attempts to access this ref will fail.', ref, componentName, this.getName()) : undefined;
         }
         var refs = inst.refs === emptyObject ? inst.refs = {} : inst.refs;
         refs[ref] = publicComponentInstance;
@@ -11650,17 +11027,16 @@ $__System.registerDynamic("d2", ["88", "4a", "c7", "6c", "4e", "80", "d3", "4f",
     });
     var ReactCompositeComponent = {Mixin: ReactCompositeComponentMixin};
     module.exports = ReactCompositeComponent;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("c8", [], true, function($__require, exports, module) {
+$__System.registerDynamic("ca", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var nullComponentIDsRegistry = {};
   function isNullComponentID(id) {
     return !!nullComponentIDsRegistry[id];
@@ -11677,47 +11053,45 @@ $__System.registerDynamic("c8", [], true, function($__require, exports, module) 
     deregisterNullComponentID: deregisterNullComponentID
   };
   module.exports = ReactEmptyComponentRegistry;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("d4", ["6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("d6", ["6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var invariant = $__require('6d');
+    var invariant = $__require('6f');
     var ReactOwner = {
       isValidOwner: function(object) {
         return !!(object && typeof object.attachRef === 'function' && typeof object.detachRef === 'function');
       },
       addComponentAsRefTo: function(component, ref, owner) {
-        !ReactOwner.isValidOwner(owner) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'addComponentAsRefTo(...): Only a ReactOwner can have refs. You might ' + 'be adding a ref to a component that was not created inside a component\'s ' + '`render` method, or you have multiple copies of React loaded ' + '(details: https://fb.me/react-refs-must-have-owner).') : invariant(false) : undefined;
+        !ReactOwner.isValidOwner(owner) ? "production" !== 'production' ? invariant(false, 'addComponentAsRefTo(...): Only a ReactOwner can have refs. You might ' + 'be adding a ref to a component that was not created inside a component\'s ' + '`render` method, or you have multiple copies of React loaded ' + '(details: https://fb.me/react-refs-must-have-owner).') : invariant(false) : undefined;
         owner.attachRef(ref, component);
       },
       removeComponentAsRefFrom: function(component, ref, owner) {
-        !ReactOwner.isValidOwner(owner) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'removeComponentAsRefFrom(...): Only a ReactOwner can have refs. You might ' + 'be removing a ref to a component that was not created inside a component\'s ' + '`render` method, or you have multiple copies of React loaded ' + '(details: https://fb.me/react-refs-must-have-owner).') : invariant(false) : undefined;
+        !ReactOwner.isValidOwner(owner) ? "production" !== 'production' ? invariant(false, 'removeComponentAsRefFrom(...): Only a ReactOwner can have refs. You might ' + 'be removing a ref to a component that was not created inside a component\'s ' + '`render` method, or you have multiple copies of React loaded ' + '(details: https://fb.me/react-refs-must-have-owner).') : invariant(false) : undefined;
         if (owner.getPublicInstance().refs[ref] === component.getPublicInstance()) {
           owner.detachRef(ref);
         }
       }
     };
     module.exports = ReactOwner;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("d5", ["d4", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("d7", ["d6", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactOwner = $__require('d4');
+    var ReactOwner = $__require('d6');
     var ReactRef = {};
     function attachRef(ref, component, owner) {
       if (typeof ref === 'function') {
@@ -11757,18 +11131,17 @@ $__System.registerDynamic("d5", ["d4", "49"], true, function($__require, exports
       }
     };
     module.exports = ReactRef;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("4f", ["d5"], true, function($__require, exports, module) {
+$__System.registerDynamic("50", ["d7"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var ReactRef = $__require('d5');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var ReactRef = $__require('d7');
   function attachRefs() {
     ReactRef.attachRefs(this, this._currentElement);
   }
@@ -11803,20 +11176,19 @@ $__System.registerDynamic("4f", ["d5"], true, function($__require, exports, modu
     }
   };
   module.exports = ReactReconciler;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("a3", ["c7", "c8", "4f", "57"], true, function($__require, exports, module) {
+$__System.registerDynamic("a5", ["c9", "ca", "50", "59"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var ReactElement = $__require('c7');
-  var ReactEmptyComponentRegistry = $__require('c8');
-  var ReactReconciler = $__require('4f');
-  var assign = $__require('57');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var ReactElement = $__require('c9');
+  var ReactEmptyComponentRegistry = $__require('ca');
+  var ReactReconciler = $__require('50');
+  var assign = $__require('59');
   var placeholderElement;
   var ReactEmptyComponentInjection = {injectEmptyComponent: function(component) {
       placeholderElement = ReactElement.createElement(component);
@@ -11843,19 +11215,18 @@ $__System.registerDynamic("a3", ["c7", "c8", "4f", "57"], true, function($__requ
   });
   ReactEmptyComponent.injection = ReactEmptyComponentInjection;
   module.exports = ReactEmptyComponent;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("a4", ["57", "6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("a6", ["59", "6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var assign = $__require('57');
-    var invariant = $__require('6d');
+    var assign = $__require('59');
+    var invariant = $__require('6f');
     var autoGenerateWrapperClass = null;
     var genericComponentClass = null;
     var tagToComponentClass = {};
@@ -11883,7 +11254,7 @@ $__System.registerDynamic("a4", ["57", "6d", "49"], true, function($__require, e
       return componentClass;
     }
     function createInternalComponent(element) {
-      !genericComponentClass ? process.env.NODE_ENV !== 'production' ? invariant(false, 'There is no registered component for the tag %s', element.type) : invariant(false) : undefined;
+      !genericComponentClass ? "production" !== 'production' ? invariant(false, 'There is no registered component for the tag %s', element.type) : invariant(false) : undefined;
       return new genericComponentClass(element.type, element.props);
     }
     function createInstanceForText(text) {
@@ -11900,24 +11271,23 @@ $__System.registerDynamic("a4", ["57", "6d", "49"], true, function($__require, e
       injection: ReactNativeComponentInjection
     };
     module.exports = ReactNativeComponent;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("83", ["d2", "a3", "a4", "57", "6d", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("85", ["d4", "a5", "a6", "59", "6f", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactCompositeComponent = $__require('d2');
-    var ReactEmptyComponent = $__require('a3');
-    var ReactNativeComponent = $__require('a4');
-    var assign = $__require('57');
-    var invariant = $__require('6d');
-    var warning = $__require('53');
+    var ReactCompositeComponent = $__require('d4');
+    var ReactEmptyComponent = $__require('a5');
+    var ReactNativeComponent = $__require('a6');
+    var assign = $__require('59');
+    var invariant = $__require('6f');
+    var warning = $__require('55');
     var ReactCompositeComponentWrapper = function() {};
     assign(ReactCompositeComponentWrapper.prototype, ReactCompositeComponent.Mixin, {_instantiateReactComponent: instantiateReactComponent});
     function getDeclarationErrorAddendum(owner) {
@@ -11938,7 +11308,7 @@ $__System.registerDynamic("83", ["d2", "a3", "a4", "57", "6d", "53", "49"], true
         instance = new ReactEmptyComponent(instantiateReactComponent);
       } else if (typeof node === 'object') {
         var element = node;
-        !(element && (typeof element.type === 'function' || typeof element.type === 'string')) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Element type is invalid: expected a string (for built-in components) ' + 'or a class/function (for composite components) but got: %s.%s', element.type == null ? element.type : typeof element.type, getDeclarationErrorAddendum(element._owner)) : invariant(false) : undefined;
+        !(element && (typeof element.type === 'function' || typeof element.type === 'string')) ? "production" !== 'production' ? invariant(false, 'Element type is invalid: expected a string (for built-in components) ' + 'or a class/function (for composite components) but got: %s.%s', element.type == null ? element.type : typeof element.type, getDeclarationErrorAddendum(element._owner)) : invariant(false) : undefined;
         if (typeof element.type === 'string') {
           instance = ReactNativeComponent.createInternalComponent(element);
         } else if (isInternalComponentType(element.type)) {
@@ -11949,19 +11319,19 @@ $__System.registerDynamic("83", ["d2", "a3", "a4", "57", "6d", "53", "49"], true
       } else if (typeof node === 'string' || typeof node === 'number') {
         instance = ReactNativeComponent.createInstanceForText(node);
       } else {
-        !false ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Encountered invalid React node of type %s', typeof node) : invariant(false) : undefined;
+        !false ? "production" !== 'production' ? invariant(false, 'Encountered invalid React node of type %s', typeof node) : invariant(false) : undefined;
       }
-      if (process.env.NODE_ENV !== 'production') {
-        process.env.NODE_ENV !== 'production' ? warning(typeof instance.construct === 'function' && typeof instance.mountComponent === 'function' && typeof instance.receiveComponent === 'function' && typeof instance.unmountComponent === 'function', 'Only React Components can be mounted.') : undefined;
+      if ("production" !== 'production') {
+        "production" !== 'production' ? warning(typeof instance.construct === 'function' && typeof instance.mountComponent === 'function' && typeof instance.receiveComponent === 'function' && typeof instance.unmountComponent === 'function', 'Only React Components can be mounted.') : undefined;
       }
       instance.construct(node);
       instance._mountIndex = 0;
       instance._mountImage = null;
-      if (process.env.NODE_ENV !== 'production') {
+      if ("production" !== 'production') {
         instance._isOwnerNecessary = false;
         instance._warnedAboutRefsInRender = false;
       }
-      if (process.env.NODE_ENV !== 'production') {
+      if ("production" !== 'production') {
         if (Object.preventExtensions) {
           Object.preventExtensions(instance);
         }
@@ -11969,30 +11339,29 @@ $__System.registerDynamic("83", ["d2", "a3", "a4", "57", "6d", "53", "49"], true
       return instance;
     }
     module.exports = instantiateReactComponent;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("d6", ["ce", "c7", "4d", "c9", "d0", "d1", "50", "ca", "83", "6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("d8", ["d0", "c9", "4e", "cb", "d2", "d3", "51", "cc", "85", "6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactDefaultBatchingStrategy = $__require('ce');
-    var ReactElement = $__require('c7');
-    var ReactInstanceHandles = $__require('4d');
-    var ReactMarkupChecksum = $__require('c9');
-    var ReactServerBatchingStrategy = $__require('d0');
-    var ReactServerRenderingTransaction = $__require('d1');
-    var ReactUpdates = $__require('50');
-    var emptyObject = $__require('ca');
-    var instantiateReactComponent = $__require('83');
-    var invariant = $__require('6d');
+    var ReactDefaultBatchingStrategy = $__require('d0');
+    var ReactElement = $__require('c9');
+    var ReactInstanceHandles = $__require('4e');
+    var ReactMarkupChecksum = $__require('cb');
+    var ReactServerBatchingStrategy = $__require('d2');
+    var ReactServerRenderingTransaction = $__require('d3');
+    var ReactUpdates = $__require('51');
+    var emptyObject = $__require('cc');
+    var instantiateReactComponent = $__require('85');
+    var invariant = $__require('6f');
     function renderToString(element) {
-      !ReactElement.isValidElement(element) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'renderToString(): You must pass a valid ReactElement.') : invariant(false) : undefined;
+      !ReactElement.isValidElement(element) ? "production" !== 'production' ? invariant(false, 'renderToString(): You must pass a valid ReactElement.') : invariant(false) : undefined;
       var transaction;
       try {
         ReactUpdates.injection.injectBatchingStrategy(ReactServerBatchingStrategy);
@@ -12009,7 +11378,7 @@ $__System.registerDynamic("d6", ["ce", "c7", "4d", "c9", "d0", "d1", "50", "ca",
       }
     }
     function renderToStaticMarkup(element) {
-      !ReactElement.isValidElement(element) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'renderToStaticMarkup(): You must pass a valid ReactElement.') : invariant(false) : undefined;
+      !ReactElement.isValidElement(element) ? "production" !== 'production' ? invariant(false, 'renderToStaticMarkup(): You must pass a valid ReactElement.') : invariant(false) : undefined;
       var transaction;
       try {
         ReactUpdates.injection.injectBatchingStrategy(ReactServerBatchingStrategy);
@@ -12028,20 +11397,19 @@ $__System.registerDynamic("d6", ["ce", "c7", "4d", "c9", "d0", "d1", "50", "ca",
       renderToString: renderToString,
       renderToStaticMarkup: renderToStaticMarkup
     };
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("d7", ["4c", "d6", "51"], true, function($__require, exports, module) {
+$__System.registerDynamic("d9", ["4d", "d8", "52"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var ReactDefaultInjection = $__require('4c');
-  var ReactServerRendering = $__require('d6');
-  var ReactVersion = $__require('51');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var ReactDefaultInjection = $__require('4d');
+  var ReactServerRendering = $__require('d8');
+  var ReactVersion = $__require('52');
   ReactDefaultInjection.inject();
   var ReactDOMServer = {
     renderToString: ReactServerRendering.renderToString,
@@ -12049,18 +11417,17 @@ $__System.registerDynamic("d7", ["4c", "d6", "51"], true, function($__require, e
     version: ReactVersion
   };
   module.exports = ReactDOMServer;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("56", ["6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("58", ["6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var invariant = $__require('6d');
+    var invariant = $__require('6f');
     var oneArgumentPooler = function(copyFieldsFrom) {
       var Klass = this;
       if (Klass.instancePool.length) {
@@ -12113,7 +11480,7 @@ $__System.registerDynamic("56", ["6d", "49"], true, function($__require, exports
     };
     var standardReleaser = function(instance) {
       var Klass = this;
-      !(instance instanceof Klass) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Trying to release an instance into a pool of a different type.') : invariant(false) : undefined;
+      !(instance instanceof Klass) ? "production" !== 'production' ? invariant(false, 'Trying to release an instance into a pool of a different type.') : invariant(false) : undefined;
       instance.destructor();
       if (Klass.instancePool.length < Klass.poolSize) {
         Klass.instancePool.push(instance);
@@ -12140,17 +11507,16 @@ $__System.registerDynamic("56", ["6d", "49"], true, function($__require, exports
       fiveArgumentPooler: fiveArgumentPooler
     };
     module.exports = PooledClass;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("a5", [], true, function($__require, exports, module) {
+$__System.registerDynamic("a7", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var ReactRootIndexInjection = {injectCreateReactRootIndex: function(_createReactRootIndex) {
       ReactRootIndex.createReactRootIndex = _createReactRootIndex;
     }};
@@ -12159,19 +11525,18 @@ $__System.registerDynamic("a5", [], true, function($__require, exports, module) 
     injection: ReactRootIndexInjection
   };
   module.exports = ReactRootIndex;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("4d", ["a5", "6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("4e", ["a7", "6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactRootIndex = $__require('a5');
-    var invariant = $__require('6d');
+    var ReactRootIndex = $__require('a7');
+    var invariant = $__require('6f');
     var SEPARATOR = '.';
     var SEPARATOR_LENGTH = SEPARATOR.length;
     var MAX_TREE_DEPTH = 10000;
@@ -12191,8 +11556,8 @@ $__System.registerDynamic("4d", ["a5", "6d", "49"], true, function($__require, e
       return id ? id.substr(0, id.lastIndexOf(SEPARATOR)) : '';
     }
     function getNextDescendantID(ancestorID, destinationID) {
-      !(isValidID(ancestorID) && isValidID(destinationID)) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'getNextDescendantID(%s, %s): Received an invalid React DOM ID.', ancestorID, destinationID) : invariant(false) : undefined;
-      !isAncestorIDOf(ancestorID, destinationID) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'getNextDescendantID(...): React has made an invalid assumption about ' + 'the DOM hierarchy. Expected `%s` to be an ancestor of `%s`.', ancestorID, destinationID) : invariant(false) : undefined;
+      !(isValidID(ancestorID) && isValidID(destinationID)) ? "production" !== 'production' ? invariant(false, 'getNextDescendantID(%s, %s): Received an invalid React DOM ID.', ancestorID, destinationID) : invariant(false) : undefined;
+      !isAncestorIDOf(ancestorID, destinationID) ? "production" !== 'production' ? invariant(false, 'getNextDescendantID(...): React has made an invalid assumption about ' + 'the DOM hierarchy. Expected `%s` to be an ancestor of `%s`.', ancestorID, destinationID) : invariant(false) : undefined;
       if (ancestorID === destinationID) {
         return ancestorID;
       }
@@ -12219,15 +11584,15 @@ $__System.registerDynamic("4d", ["a5", "6d", "49"], true, function($__require, e
         }
       }
       var longestCommonID = oneID.substr(0, lastCommonMarkerIndex);
-      !isValidID(longestCommonID) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'getFirstCommonAncestorID(%s, %s): Expected a valid React DOM ID: %s', oneID, twoID, longestCommonID) : invariant(false) : undefined;
+      !isValidID(longestCommonID) ? "production" !== 'production' ? invariant(false, 'getFirstCommonAncestorID(%s, %s): Expected a valid React DOM ID: %s', oneID, twoID, longestCommonID) : invariant(false) : undefined;
       return longestCommonID;
     }
     function traverseParentPath(start, stop, cb, arg, skipFirst, skipLast) {
       start = start || '';
       stop = stop || '';
-      !(start !== stop) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'traverseParentPath(...): Cannot traverse from and to the same ID, `%s`.', start) : invariant(false) : undefined;
+      !(start !== stop) ? "production" !== 'production' ? invariant(false, 'traverseParentPath(...): Cannot traverse from and to the same ID, `%s`.', start) : invariant(false) : undefined;
       var traverseUp = isAncestorIDOf(stop, start);
-      !(traverseUp || isAncestorIDOf(start, stop)) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'traverseParentPath(%s, %s, ...): Cannot traverse from two IDs that do ' + 'not have a parent path.', start, stop) : invariant(false) : undefined;
+      !(traverseUp || isAncestorIDOf(start, stop)) ? "production" !== 'production' ? invariant(false, 'traverseParentPath(%s, %s, ...): Cannot traverse from two IDs that do ' + 'not have a parent path.', start, stop) : invariant(false) : undefined;
       var depth = 0;
       var traverse = traverseUp ? getParentID : getNextDescendantID;
       for (var id = start; ; id = traverse(id, stop)) {
@@ -12238,7 +11603,7 @@ $__System.registerDynamic("4d", ["a5", "6d", "49"], true, function($__require, e
         if (ret === false || id === stop) {
           break;
         }
-        !(depth++ < MAX_TREE_DEPTH) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'traverseParentPath(%s, %s, ...): Detected an infinite loop while ' + 'traversing the React DOM ID tree. This may be due to malformed IDs: %s', start, stop, id) : invariant(false) : undefined;
+        !(depth++ < MAX_TREE_DEPTH) ? "production" !== 'production' ? invariant(false, 'traverseParentPath(%s, %s, ...): Detected an infinite loop while ' + 'traversing the React DOM ID tree. This may be due to malformed IDs: %s', start, stop, id) : invariant(false) : undefined;
       }
     }
     var ReactInstanceHandles = {
@@ -12285,24 +11650,23 @@ $__System.registerDynamic("4d", ["a5", "6d", "49"], true, function($__require, e
       SEPARATOR: SEPARATOR
     };
     module.exports = ReactInstanceHandles;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("85", ["4a", "c7", "4d", "d8", "6d", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("87", ["4b", "c9", "4e", "da", "6f", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactCurrentOwner = $__require('4a');
-    var ReactElement = $__require('c7');
-    var ReactInstanceHandles = $__require('4d');
-    var getIteratorFn = $__require('d8');
-    var invariant = $__require('6d');
-    var warning = $__require('53');
+    var ReactCurrentOwner = $__require('4b');
+    var ReactElement = $__require('c9');
+    var ReactInstanceHandles = $__require('4e');
+    var getIteratorFn = $__require('da');
+    var invariant = $__require('6f');
+    var warning = $__require('55');
     var SEPARATOR = ReactInstanceHandles.SEPARATOR;
     var SUBSEPARATOR = ':';
     var userProvidedKeyEscaperLookup = {
@@ -12359,8 +11723,8 @@ $__System.registerDynamic("85", ["4a", "c7", "4d", "d8", "6d", "53", "49"], true
               subtreeCount += traverseAllChildrenImpl(child, nextName, callback, traverseContext);
             }
           } else {
-            if (process.env.NODE_ENV !== 'production') {
-              process.env.NODE_ENV !== 'production' ? warning(didWarnAboutMaps, 'Using Maps as children is not yet fully supported. It is an ' + 'experimental feature that might be removed. Convert it to a ' + 'sequence / iterable of keyed ReactElements instead.') : undefined;
+            if ("production" !== 'production') {
+              "production" !== 'production' ? warning(didWarnAboutMaps, 'Using Maps as children is not yet fully supported. It is an ' + 'experimental feature that might be removed. Convert it to a ' + 'sequence / iterable of keyed ReactElements instead.') : undefined;
               didWarnAboutMaps = true;
             }
             while (!(step = iterator.next()).done) {
@@ -12374,7 +11738,7 @@ $__System.registerDynamic("85", ["4a", "c7", "4d", "d8", "6d", "53", "49"], true
           }
         } else if (type === 'object') {
           var addendum = '';
-          if (process.env.NODE_ENV !== 'production') {
+          if ("production" !== 'production') {
             addendum = ' If you meant to render a collection of children, use an array ' + 'instead or wrap the object using createFragment(object) from the ' + 'React add-ons.';
             if (children._isReactElement) {
               addendum = ' It looks like you\'re using an element created by a different ' + 'version of React. Make sure to use only one copy of React.';
@@ -12387,7 +11751,7 @@ $__System.registerDynamic("85", ["4a", "c7", "4d", "d8", "6d", "53", "49"], true
             }
           }
           var childrenString = String(children);
-          !false ? process.env.NODE_ENV !== 'production' ? invariant(false, 'Objects are not valid as a React child (found: %s).%s', childrenString === '[object Object]' ? 'object with keys {' + Object.keys(children).join(', ') + '}' : childrenString, addendum) : invariant(false) : undefined;
+          !false ? "production" !== 'production' ? invariant(false, 'Objects are not valid as a React child (found: %s).%s', childrenString === '[object Object]' ? 'object with keys {' + Object.keys(children).join(', ') + '}' : childrenString, addendum) : invariant(false) : undefined;
         }
       }
       return subtreeCount;
@@ -12399,21 +11763,20 @@ $__System.registerDynamic("85", ["4a", "c7", "4d", "d8", "6d", "53", "49"], true
       return traverseAllChildrenImpl(children, '', callback, traverseContext);
     }
     module.exports = traverseAllChildren;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("7d", ["56", "c7", "9a", "85"], true, function($__require, exports, module) {
+$__System.registerDynamic("7f", ["58", "c9", "9c", "87"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var PooledClass = $__require('56');
-  var ReactElement = $__require('c7');
-  var emptyFunction = $__require('9a');
-  var traverseAllChildren = $__require('85');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var PooledClass = $__require('58');
+  var ReactElement = $__require('c9');
+  var emptyFunction = $__require('9c');
+  var traverseAllChildren = $__require('87');
   var twoArgumentPooler = PooledClass.twoArgumentPooler;
   var fourArgumentPooler = PooledClass.fourArgumentPooler;
   var userProvidedKeyEscapeRegex = /\/(?!\/)/g;
@@ -12510,22 +11873,21 @@ $__System.registerDynamic("7d", ["56", "c7", "9a", "85"], true, function($__requ
     toArray: toArray
   };
   module.exports = ReactChildren;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("d9", ["da", "8f", "ca", "6d", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("db", ["dc", "91", "cc", "6f", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactNoopUpdateQueue = $__require('da');
-    var canDefineProperty = $__require('8f');
-    var emptyObject = $__require('ca');
-    var invariant = $__require('6d');
-    var warning = $__require('53');
+    var ReactNoopUpdateQueue = $__require('dc');
+    var canDefineProperty = $__require('91');
+    var emptyObject = $__require('cc');
+    var invariant = $__require('6f');
+    var warning = $__require('55');
     function ReactComponent(props, context, updater) {
       this.props = props;
       this.context = context;
@@ -12534,9 +11896,9 @@ $__System.registerDynamic("d9", ["da", "8f", "ca", "6d", "53", "49"], true, func
     }
     ReactComponent.prototype.isReactComponent = {};
     ReactComponent.prototype.setState = function(partialState, callback) {
-      !(typeof partialState === 'object' || typeof partialState === 'function' || partialState == null) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'setState(...): takes an object of state variables to update or a ' + 'function which returns an object of state variables.') : invariant(false) : undefined;
-      if (process.env.NODE_ENV !== 'production') {
-        process.env.NODE_ENV !== 'production' ? warning(partialState != null, 'setState(...): You passed an undefined or null state object; ' + 'instead, use forceUpdate().') : undefined;
+      !(typeof partialState === 'object' || typeof partialState === 'function' || partialState == null) ? "production" !== 'production' ? invariant(false, 'setState(...): takes an object of state variables to update or a ' + 'function which returns an object of state variables.') : invariant(false) : undefined;
+      if ("production" !== 'production') {
+        "production" !== 'production' ? warning(partialState != null, 'setState(...): You passed an undefined or null state object; ' + 'instead, use forceUpdate().') : undefined;
       }
       this.updater.enqueueSetState(this, partialState);
       if (callback) {
@@ -12549,7 +11911,7 @@ $__System.registerDynamic("d9", ["da", "8f", "ca", "6d", "53", "49"], true, func
         this.updater.enqueueCallback(this, callback);
       }
     };
-    if (process.env.NODE_ENV !== 'production') {
+    if ("production" !== 'production') {
       var deprecatedAPIs = {
         getDOMNode: ['getDOMNode', 'Use ReactDOM.findDOMNode(component) instead.'],
         isMounted: ['isMounted', 'Instead, make sure to clean up subscriptions and pending requests in ' + 'componentWillUnmount to prevent memory leaks.'],
@@ -12560,7 +11922,7 @@ $__System.registerDynamic("d9", ["da", "8f", "ca", "6d", "53", "49"], true, func
       var defineDeprecationWarning = function(methodName, info) {
         if (canDefineProperty) {
           Object.defineProperty(ReactComponent.prototype, methodName, {get: function() {
-              process.env.NODE_ENV !== 'production' ? warning(false, '%s(...) is deprecated in plain JavaScript React classes. %s', info[0], info[1]) : undefined;
+              "production" !== 'production' ? warning(false, '%s(...) is deprecated in plain JavaScript React classes. %s', info[0], info[1]) : undefined;
               return undefined;
             }});
         }
@@ -12572,22 +11934,21 @@ $__System.registerDynamic("d9", ["da", "8f", "ca", "6d", "53", "49"], true, func
       }
     }
     module.exports = ReactComponent;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("da", ["53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("dc", ["55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var warning = $__require('53');
+    var warning = $__require('55');
     function warnTDZ(publicInstance, callerName) {
-      if (process.env.NODE_ENV !== 'production') {
-        process.env.NODE_ENV !== 'production' ? warning(false, '%s(...): Can only update a mounted or mounting component. ' + 'This usually means you called %s() on an unmounted component. ' + 'This is a no-op. Please check the code for the %s component.', callerName, callerName, publicInstance.constructor && publicInstance.constructor.displayName || '') : undefined;
+      if ("production" !== 'production') {
+        "production" !== 'production' ? warning(false, '%s(...): Can only update a mounted or mounting component. ' + 'This usually means you called %s() on an unmounted component. ' + 'This is a no-op. Please check the code for the %s component.', callerName, callerName, publicInstance.constructor && publicInstance.constructor.displayName || '') : undefined;
       }
     }
     var ReactNoopUpdateQueue = {
@@ -12612,34 +11973,32 @@ $__System.registerDynamic("da", ["53", "49"], true, function($__require, exports
       }
     };
     module.exports = ReactNoopUpdateQueue;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("ca", ["49"], true, function($__require, exports, module) {
+$__System.registerDynamic("cc", ["54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
     var emptyObject = {};
-    if (process.env.NODE_ENV !== 'production') {
+    if ("production" !== 'production') {
       Object.freeze(emptyObject);
     }
     module.exports = emptyObject;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("5f", [], true, function($__require, exports, module) {
+$__System.registerDynamic("61", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var keyOf = function(oneKeyObj) {
     var key;
     for (key in oneKeyObj) {
@@ -12651,28 +12010,27 @@ $__System.registerDynamic("5f", [], true, function($__require, exports, module) 
     return null;
   };
   module.exports = keyOf;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("a2", ["d9", "c7", "80", "d3", "da", "57", "ca", "6d", "9b", "5f", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("a4", ["db", "c9", "82", "d5", "dc", "59", "cc", "6f", "9d", "61", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactComponent = $__require('d9');
-    var ReactElement = $__require('c7');
-    var ReactPropTypeLocations = $__require('80');
-    var ReactPropTypeLocationNames = $__require('d3');
-    var ReactNoopUpdateQueue = $__require('da');
-    var assign = $__require('57');
-    var emptyObject = $__require('ca');
-    var invariant = $__require('6d');
-    var keyMirror = $__require('9b');
-    var keyOf = $__require('5f');
-    var warning = $__require('53');
+    var ReactComponent = $__require('db');
+    var ReactElement = $__require('c9');
+    var ReactPropTypeLocations = $__require('82');
+    var ReactPropTypeLocationNames = $__require('d5');
+    var ReactNoopUpdateQueue = $__require('dc');
+    var assign = $__require('59');
+    var emptyObject = $__require('cc');
+    var invariant = $__require('6f');
+    var keyMirror = $__require('9d');
+    var keyOf = $__require('61');
+    var warning = $__require('55');
     var MIXINS_KEY = keyOf({mixins: null});
     var SpecPolicy = keyMirror({
       DEFINE_ONCE: null,
@@ -12685,7 +12043,7 @@ $__System.registerDynamic("a2", ["d9", "c7", "80", "d3", "da", "57", "ca", "6d",
     function warnSetProps() {
       if (!warnedSetProps) {
         warnedSetProps = true;
-        process.env.NODE_ENV !== 'production' ? warning(false, 'setProps(...) and replaceProps(...) are deprecated. ' + 'Instead, call render again at the top level.') : undefined;
+        "production" !== 'production' ? warning(false, 'setProps(...) and replaceProps(...) are deprecated. ' + 'Instead, call render again at the top level.') : undefined;
       }
     }
     var ReactClassInterface = {
@@ -12719,13 +12077,13 @@ $__System.registerDynamic("a2", ["d9", "c7", "80", "d3", "da", "57", "ca", "6d",
         }
       },
       childContextTypes: function(Constructor, childContextTypes) {
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           validateTypeDef(Constructor, childContextTypes, ReactPropTypeLocations.childContext);
         }
         Constructor.childContextTypes = assign({}, Constructor.childContextTypes, childContextTypes);
       },
       contextTypes: function(Constructor, contextTypes) {
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           validateTypeDef(Constructor, contextTypes, ReactPropTypeLocations.context);
         }
         Constructor.contextTypes = assign({}, Constructor.contextTypes, contextTypes);
@@ -12738,7 +12096,7 @@ $__System.registerDynamic("a2", ["d9", "c7", "80", "d3", "da", "57", "ca", "6d",
         }
       },
       propTypes: function(Constructor, propTypes) {
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           validateTypeDef(Constructor, propTypes, ReactPropTypeLocations.prop);
         }
         Constructor.propTypes = assign({}, Constructor.propTypes, propTypes);
@@ -12751,25 +12109,25 @@ $__System.registerDynamic("a2", ["d9", "c7", "80", "d3", "da", "57", "ca", "6d",
     function validateTypeDef(Constructor, typeDef, location) {
       for (var propName in typeDef) {
         if (typeDef.hasOwnProperty(propName)) {
-          process.env.NODE_ENV !== 'production' ? warning(typeof typeDef[propName] === 'function', '%s: %s type `%s` is invalid; it must be a function, usually from ' + 'React.PropTypes.', Constructor.displayName || 'ReactClass', ReactPropTypeLocationNames[location], propName) : undefined;
+          "production" !== 'production' ? warning(typeof typeDef[propName] === 'function', '%s: %s type `%s` is invalid; it must be a function, usually from ' + 'React.PropTypes.', Constructor.displayName || 'ReactClass', ReactPropTypeLocationNames[location], propName) : undefined;
         }
       }
     }
     function validateMethodOverride(proto, name) {
       var specPolicy = ReactClassInterface.hasOwnProperty(name) ? ReactClassInterface[name] : null;
       if (ReactClassMixin.hasOwnProperty(name)) {
-        !(specPolicy === SpecPolicy.OVERRIDE_BASE) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'ReactClassInterface: You are attempting to override ' + '`%s` from your class specification. Ensure that your method names ' + 'do not overlap with React methods.', name) : invariant(false) : undefined;
+        !(specPolicy === SpecPolicy.OVERRIDE_BASE) ? "production" !== 'production' ? invariant(false, 'ReactClassInterface: You are attempting to override ' + '`%s` from your class specification. Ensure that your method names ' + 'do not overlap with React methods.', name) : invariant(false) : undefined;
       }
       if (proto.hasOwnProperty(name)) {
-        !(specPolicy === SpecPolicy.DEFINE_MANY || specPolicy === SpecPolicy.DEFINE_MANY_MERGED) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'ReactClassInterface: You are attempting to define ' + '`%s` on your component more than once. This conflict may be due ' + 'to a mixin.', name) : invariant(false) : undefined;
+        !(specPolicy === SpecPolicy.DEFINE_MANY || specPolicy === SpecPolicy.DEFINE_MANY_MERGED) ? "production" !== 'production' ? invariant(false, 'ReactClassInterface: You are attempting to define ' + '`%s` on your component more than once. This conflict may be due ' + 'to a mixin.', name) : invariant(false) : undefined;
       }
     }
     function mixSpecIntoComponent(Constructor, spec) {
       if (!spec) {
         return;
       }
-      !(typeof spec !== 'function') ? process.env.NODE_ENV !== 'production' ? invariant(false, 'ReactClass: You\'re attempting to ' + 'use a component class as a mixin. Instead, just use a regular object.') : invariant(false) : undefined;
-      !!ReactElement.isValidElement(spec) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'ReactClass: You\'re attempting to ' + 'use a component as a mixin. Instead, just use a regular object.') : invariant(false) : undefined;
+      !(typeof spec !== 'function') ? "production" !== 'production' ? invariant(false, 'ReactClass: You\'re attempting to ' + 'use a component class as a mixin. Instead, just use a regular object.') : invariant(false) : undefined;
+      !!ReactElement.isValidElement(spec) ? "production" !== 'production' ? invariant(false, 'ReactClass: You\'re attempting to ' + 'use a component as a mixin. Instead, just use a regular object.') : invariant(false) : undefined;
       var proto = Constructor.prototype;
       if (spec.hasOwnProperty(MIXINS_KEY)) {
         RESERVED_SPEC_KEYS.mixins(Constructor, spec.mixins);
@@ -12799,7 +12157,7 @@ $__System.registerDynamic("a2", ["d9", "c7", "80", "d3", "da", "57", "ca", "6d",
           } else {
             if (isAlreadyDefined) {
               var specPolicy = ReactClassInterface[name];
-              !(isReactClassMethod && (specPolicy === SpecPolicy.DEFINE_MANY_MERGED || specPolicy === SpecPolicy.DEFINE_MANY)) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'ReactClass: Unexpected spec policy %s for key %s ' + 'when mixing in component specs.', specPolicy, name) : invariant(false) : undefined;
+              !(isReactClassMethod && (specPolicy === SpecPolicy.DEFINE_MANY_MERGED || specPolicy === SpecPolicy.DEFINE_MANY)) ? "production" !== 'production' ? invariant(false, 'ReactClass: Unexpected spec policy %s for key %s ' + 'when mixing in component specs.', specPolicy, name) : invariant(false) : undefined;
               if (specPolicy === SpecPolicy.DEFINE_MANY_MERGED) {
                 proto[name] = createMergedResultFunction(proto[name], property);
               } else if (specPolicy === SpecPolicy.DEFINE_MANY) {
@@ -12807,7 +12165,7 @@ $__System.registerDynamic("a2", ["d9", "c7", "80", "d3", "da", "57", "ca", "6d",
               }
             } else {
               proto[name] = property;
-              if (process.env.NODE_ENV !== 'production') {
+              if ("production" !== 'production') {
                 if (typeof property === 'function' && spec.displayName) {
                   proto[name].displayName = spec.displayName + '_' + name;
                 }
@@ -12827,17 +12185,17 @@ $__System.registerDynamic("a2", ["d9", "c7", "80", "d3", "da", "57", "ca", "6d",
           continue;
         }
         var isReserved = (name in RESERVED_SPEC_KEYS);
-        !!isReserved ? process.env.NODE_ENV !== 'production' ? invariant(false, 'ReactClass: You are attempting to define a reserved ' + 'property, `%s`, that shouldn\'t be on the "statics" key. Define it ' + 'as an instance property instead; it will still be accessible on the ' + 'constructor.', name) : invariant(false) : undefined;
+        !!isReserved ? "production" !== 'production' ? invariant(false, 'ReactClass: You are attempting to define a reserved ' + 'property, `%s`, that shouldn\'t be on the "statics" key. Define it ' + 'as an instance property instead; it will still be accessible on the ' + 'constructor.', name) : invariant(false) : undefined;
         var isInherited = (name in Constructor);
-        !!isInherited ? process.env.NODE_ENV !== 'production' ? invariant(false, 'ReactClass: You are attempting to define ' + '`%s` on your component more than once. This conflict may be ' + 'due to a mixin.', name) : invariant(false) : undefined;
+        !!isInherited ? "production" !== 'production' ? invariant(false, 'ReactClass: You are attempting to define ' + '`%s` on your component more than once. This conflict may be ' + 'due to a mixin.', name) : invariant(false) : undefined;
         Constructor[name] = property;
       }
     }
     function mergeIntoWithNoDuplicateKeys(one, two) {
-      !(one && two && typeof one === 'object' && typeof two === 'object') ? process.env.NODE_ENV !== 'production' ? invariant(false, 'mergeIntoWithNoDuplicateKeys(): Cannot merge non-objects.') : invariant(false) : undefined;
+      !(one && two && typeof one === 'object' && typeof two === 'object') ? "production" !== 'production' ? invariant(false, 'mergeIntoWithNoDuplicateKeys(): Cannot merge non-objects.') : invariant(false) : undefined;
       for (var key in two) {
         if (two.hasOwnProperty(key)) {
-          !(one[key] === undefined) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'mergeIntoWithNoDuplicateKeys(): ' + 'Tried to merge two objects with the same key: `%s`. This conflict ' + 'may be due to a mixin; in particular, this may be caused by two ' + 'getInitialState() or getDefaultProps() methods returning objects ' + 'with clashing keys.', key) : invariant(false) : undefined;
+          !(one[key] === undefined) ? "production" !== 'production' ? invariant(false, 'mergeIntoWithNoDuplicateKeys(): ' + 'Tried to merge two objects with the same key: `%s`. This conflict ' + 'may be due to a mixin; in particular, this may be caused by two ' + 'getInitialState() or getDefaultProps() methods returning objects ' + 'with clashing keys.', key) : invariant(false) : undefined;
           one[key] = two[key];
         }
       }
@@ -12866,7 +12224,7 @@ $__System.registerDynamic("a2", ["d9", "c7", "80", "d3", "da", "57", "ca", "6d",
     }
     function bindAutoBindMethod(component, method) {
       var boundMethod = method.bind(component);
-      if (process.env.NODE_ENV !== 'production') {
+      if ("production" !== 'production') {
         boundMethod.__reactBoundContext = component;
         boundMethod.__reactBoundMethod = method;
         boundMethod.__reactBoundArguments = null;
@@ -12879,9 +12237,9 @@ $__System.registerDynamic("a2", ["d9", "c7", "80", "d3", "da", "57", "ca", "6d",
             args[_key - 1] = arguments[_key];
           }
           if (newThis !== component && newThis !== null) {
-            process.env.NODE_ENV !== 'production' ? warning(false, 'bind(): React component methods may only be bound to the ' + 'component instance. See %s', componentName) : undefined;
+            "production" !== 'production' ? warning(false, 'bind(): React component methods may only be bound to the ' + 'component instance. See %s', componentName) : undefined;
           } else if (!args.length) {
-            process.env.NODE_ENV !== 'production' ? warning(false, 'bind(): You are binding a component method to the component. ' + 'React does this for you automatically in a high-performance ' + 'way, so you can safely remove this call. See %s', componentName) : undefined;
+            "production" !== 'production' ? warning(false, 'bind(): You are binding a component method to the component. ' + 'React does this for you automatically in a high-performance ' + 'way, so you can safely remove this call. See %s', componentName) : undefined;
             return boundMethod;
           }
           var reboundMethod = _bind.apply(boundMethod, arguments);
@@ -12912,7 +12270,7 @@ $__System.registerDynamic("a2", ["d9", "c7", "80", "d3", "da", "57", "ca", "6d",
         return this.updater.isMounted(this);
       },
       setProps: function(partialProps, callback) {
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           warnSetProps();
         }
         this.updater.enqueueSetProps(this, partialProps);
@@ -12921,7 +12279,7 @@ $__System.registerDynamic("a2", ["d9", "c7", "80", "d3", "da", "57", "ca", "6d",
         }
       },
       replaceProps: function(newProps, callback) {
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           warnSetProps();
         }
         this.updater.enqueueReplaceProps(this, newProps);
@@ -12935,8 +12293,8 @@ $__System.registerDynamic("a2", ["d9", "c7", "80", "d3", "da", "57", "ca", "6d",
     var ReactClass = {
       createClass: function(spec) {
         var Constructor = function(props, context, updater) {
-          if (process.env.NODE_ENV !== 'production') {
-            process.env.NODE_ENV !== 'production' ? warning(this instanceof Constructor, 'Something is calling a React component directly. Use a factory or ' + 'JSX instead. See: https://fb.me/react-legacyfactory') : undefined;
+          if ("production" !== 'production') {
+            "production" !== 'production' ? warning(this instanceof Constructor, 'Something is calling a React component directly. Use a factory or ' + 'JSX instead. See: https://fb.me/react-legacyfactory') : undefined;
           }
           if (this.__reactAutoBindMap) {
             bindAutoBindMethods(this);
@@ -12947,12 +12305,12 @@ $__System.registerDynamic("a2", ["d9", "c7", "80", "d3", "da", "57", "ca", "6d",
           this.updater = updater || ReactNoopUpdateQueue;
           this.state = null;
           var initialState = this.getInitialState ? this.getInitialState() : null;
-          if (process.env.NODE_ENV !== 'production') {
+          if ("production" !== 'production') {
             if (typeof initialState === 'undefined' && this.getInitialState._isMockFunction) {
               initialState = null;
             }
           }
-          !(typeof initialState === 'object' && !Array.isArray(initialState)) ? process.env.NODE_ENV !== 'production' ? invariant(false, '%s.getInitialState(): must return an object or null', Constructor.displayName || 'ReactCompositeComponent') : invariant(false) : undefined;
+          !(typeof initialState === 'object' && !Array.isArray(initialState)) ? "production" !== 'production' ? invariant(false, '%s.getInitialState(): must return an object or null', Constructor.displayName || 'ReactCompositeComponent') : invariant(false) : undefined;
           this.state = initialState;
         };
         Constructor.prototype = new ReactClassComponent();
@@ -12962,7 +12320,7 @@ $__System.registerDynamic("a2", ["d9", "c7", "80", "d3", "da", "57", "ca", "6d",
         if (Constructor.getDefaultProps) {
           Constructor.defaultProps = Constructor.getDefaultProps();
         }
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           if (Constructor.getDefaultProps) {
             Constructor.getDefaultProps.isReactClassApproved = {};
           }
@@ -12970,10 +12328,10 @@ $__System.registerDynamic("a2", ["d9", "c7", "80", "d3", "da", "57", "ca", "6d",
             Constructor.prototype.getInitialState.isReactClassApproved = {};
           }
         }
-        !Constructor.prototype.render ? process.env.NODE_ENV !== 'production' ? invariant(false, 'createClass(...): Class specification must implement a `render` method.') : invariant(false) : undefined;
-        if (process.env.NODE_ENV !== 'production') {
-          process.env.NODE_ENV !== 'production' ? warning(!Constructor.prototype.componentShouldUpdate, '%s has a method called ' + 'componentShouldUpdate(). Did you mean shouldComponentUpdate()? ' + 'The name is phrased as a question because the function is ' + 'expected to return a value.', spec.displayName || 'A component') : undefined;
-          process.env.NODE_ENV !== 'production' ? warning(!Constructor.prototype.componentWillRecieveProps, '%s has a method called ' + 'componentWillRecieveProps(). Did you mean componentWillReceiveProps()?', spec.displayName || 'A component') : undefined;
+        !Constructor.prototype.render ? "production" !== 'production' ? invariant(false, 'createClass(...): Class specification must implement a `render` method.') : invariant(false) : undefined;
+        if ("production" !== 'production') {
+          "production" !== 'production' ? warning(!Constructor.prototype.componentShouldUpdate, '%s has a method called ' + 'componentShouldUpdate(). Did you mean shouldComponentUpdate()? ' + 'The name is phrased as a question because the function is ' + 'expected to return a value.', spec.displayName || 'A component') : undefined;
+          "production" !== 'production' ? warning(!Constructor.prototype.componentWillRecieveProps, '%s has a method called ' + 'componentWillRecieveProps(). Did you mean componentWillReceiveProps()?', spec.displayName || 'A component') : undefined;
         }
         for (var methodName in ReactClassInterface) {
           if (!Constructor.prototype[methodName]) {
@@ -12987,17 +12345,16 @@ $__System.registerDynamic("a2", ["d9", "c7", "80", "d3", "da", "57", "ca", "6d",
         }}
     };
     module.exports = ReactClass;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("db", [], true, function($__require, exports, module) {
+$__System.registerDynamic("dd", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var hasOwnProperty = Object.prototype.hasOwnProperty;
   function mapObject(object, callback, context) {
     if (!object) {
@@ -13012,22 +12369,21 @@ $__System.registerDynamic("db", [], true, function($__require, exports, module) 
     return result;
   }
   module.exports = mapObject;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("dc", ["c7", "dd", "db", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("de", ["c9", "df", "dd", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactElement = $__require('c7');
-    var ReactElementValidator = $__require('dd');
-    var mapObject = $__require('db');
+    var ReactElement = $__require('c9');
+    var ReactElementValidator = $__require('df');
+    var mapObject = $__require('dd');
     function createDOMFactory(tag) {
-      if (process.env.NODE_ENV !== 'production') {
+      if ("production" !== 'production') {
         return ReactElementValidator.createFactory(tag);
       }
       return ReactElement.createFactory(tag);
@@ -13167,23 +12523,22 @@ $__System.registerDynamic("dc", ["c7", "dd", "db", "49"], true, function($__requ
       tspan: 'tspan'
     }, createDOMFactory);
     module.exports = ReactDOMFactories;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("9b", ["6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("9d", ["6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var invariant = $__require('6d');
+    var invariant = $__require('6f');
     var keyMirror = function(obj) {
       var ret = {};
       var key;
-      !(obj instanceof Object && !Array.isArray(obj)) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'keyMirror(...): Argument must be an object.') : invariant(false) : undefined;
+      !(obj instanceof Object && !Array.isArray(obj)) ? "production" !== 'production' ? invariant(false, 'keyMirror(...): Argument must be an object.') : invariant(false) : undefined;
       for (key in obj) {
         if (!obj.hasOwnProperty(key)) {
           continue;
@@ -13193,43 +12548,41 @@ $__System.registerDynamic("9b", ["6d", "49"], true, function($__require, exports
       return ret;
     };
     module.exports = keyMirror;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("80", ["9b"], true, function($__require, exports, module) {
+$__System.registerDynamic("82", ["9d"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var keyMirror = $__require('9b');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var keyMirror = $__require('9d');
   var ReactPropTypeLocations = keyMirror({
     prop: null,
     context: null,
     childContext: null
   });
   module.exports = ReactPropTypeLocations;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("dd", ["c7", "80", "d3", "4a", "8f", "d8", "6d", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("df", ["c9", "82", "d5", "4b", "91", "da", "6f", "55", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactElement = $__require('c7');
-    var ReactPropTypeLocations = $__require('80');
-    var ReactPropTypeLocationNames = $__require('d3');
-    var ReactCurrentOwner = $__require('4a');
-    var canDefineProperty = $__require('8f');
-    var getIteratorFn = $__require('d8');
-    var invariant = $__require('6d');
-    var warning = $__require('53');
+    var ReactElement = $__require('c9');
+    var ReactPropTypeLocations = $__require('82');
+    var ReactPropTypeLocationNames = $__require('d5');
+    var ReactCurrentOwner = $__require('4b');
+    var canDefineProperty = $__require('91');
+    var getIteratorFn = $__require('da');
+    var invariant = $__require('6f');
+    var warning = $__require('55');
     function getDeclarationErrorAddendum() {
       if (ReactCurrentOwner.current) {
         var name = ReactCurrentOwner.current.getName();
@@ -13250,7 +12603,7 @@ $__System.registerDynamic("dd", ["c7", "80", "d3", "4a", "8f", "d8", "6d", "53",
       if (addenda === null) {
         return;
       }
-      process.env.NODE_ENV !== 'production' ? warning(false, 'Each child in an array or iterator should have a unique "key" prop.' + '%s%s%s', addenda.parentOrOwner || '', addenda.childOwner || '', addenda.url || '') : undefined;
+      "production" !== 'production' ? warning(false, 'Each child in an array or iterator should have a unique "key" prop.' + '%s%s%s', addenda.parentOrOwner || '', addenda.childOwner || '', addenda.url || '') : undefined;
     }
     function getAddendaForKeyUse(messageType, element, parentType) {
       var addendum = getDeclarationErrorAddendum();
@@ -13310,16 +12663,16 @@ $__System.registerDynamic("dd", ["c7", "80", "d3", "4a", "8f", "d8", "6d", "53",
         if (propTypes.hasOwnProperty(propName)) {
           var error;
           try {
-            !(typeof propTypes[propName] === 'function') ? process.env.NODE_ENV !== 'production' ? invariant(false, '%s: %s type `%s` is invalid; it must be a function, usually from ' + 'React.PropTypes.', componentName || 'React class', ReactPropTypeLocationNames[location], propName) : invariant(false) : undefined;
+            !(typeof propTypes[propName] === 'function') ? "production" !== 'production' ? invariant(false, '%s: %s type `%s` is invalid; it must be a function, usually from ' + 'React.PropTypes.', componentName || 'React class', ReactPropTypeLocationNames[location], propName) : invariant(false) : undefined;
             error = propTypes[propName](props, propName, componentName, location);
           } catch (ex) {
             error = ex;
           }
-          process.env.NODE_ENV !== 'production' ? warning(!error || error instanceof Error, '%s: type specification of %s `%s` is invalid; the type checker ' + 'function must return `null` or an `Error` but returned a %s. ' + 'You may have forgotten to pass an argument to the type checker ' + 'creator (arrayOf, instanceOf, objectOf, oneOf, oneOfType, and ' + 'shape all require an argument).', componentName || 'React class', ReactPropTypeLocationNames[location], propName, typeof error) : undefined;
+          "production" !== 'production' ? warning(!error || error instanceof Error, '%s: type specification of %s `%s` is invalid; the type checker ' + 'function must return `null` or an `Error` but returned a %s. ' + 'You may have forgotten to pass an argument to the type checker ' + 'creator (arrayOf, instanceOf, objectOf, oneOf, oneOfType, and ' + 'shape all require an argument).', componentName || 'React class', ReactPropTypeLocationNames[location], propName, typeof error) : undefined;
           if (error instanceof Error && !(error.message in loggedTypeFailures)) {
             loggedTypeFailures[error.message] = true;
             var addendum = getDeclarationErrorAddendum();
-            process.env.NODE_ENV !== 'production' ? warning(false, 'Failed propType: %s%s', error.message, addendum) : undefined;
+            "production" !== 'production' ? warning(false, 'Failed propType: %s%s', error.message, addendum) : undefined;
           }
         }
       }
@@ -13334,13 +12687,13 @@ $__System.registerDynamic("dd", ["c7", "80", "d3", "4a", "8f", "d8", "6d", "53",
         checkPropTypes(name, componentClass.propTypes, element.props, ReactPropTypeLocations.prop);
       }
       if (typeof componentClass.getDefaultProps === 'function') {
-        process.env.NODE_ENV !== 'production' ? warning(componentClass.getDefaultProps.isReactClassApproved, 'getDefaultProps is only used on classic React.createClass ' + 'definitions. Use a static property named `defaultProps` instead.') : undefined;
+        "production" !== 'production' ? warning(componentClass.getDefaultProps.isReactClassApproved, 'getDefaultProps is only used on classic React.createClass ' + 'definitions. Use a static property named `defaultProps` instead.') : undefined;
       }
     }
     var ReactElementValidator = {
       createElement: function(type, props, children) {
         var validType = typeof type === 'string' || typeof type === 'function';
-        process.env.NODE_ENV !== 'production' ? warning(validType, 'React.createElement: type should not be null, undefined, boolean, or ' + 'number. It should be a string (for DOM elements) or a ReactClass ' + '(for composite components).%s', getDeclarationErrorAddendum()) : undefined;
+        "production" !== 'production' ? warning(validType, 'React.createElement: type should not be null, undefined, boolean, or ' + 'number. It should be a string (for DOM elements) or a ReactClass ' + '(for composite components).%s', getDeclarationErrorAddendum()) : undefined;
         var element = ReactElement.createElement.apply(this, arguments);
         if (element == null) {
           return element;
@@ -13356,12 +12709,12 @@ $__System.registerDynamic("dd", ["c7", "80", "d3", "4a", "8f", "d8", "6d", "53",
       createFactory: function(type) {
         var validatedFactory = ReactElementValidator.createElement.bind(null, type);
         validatedFactory.type = type;
-        if (process.env.NODE_ENV !== 'production') {
+        if ("production" !== 'production') {
           if (canDefineProperty) {
             Object.defineProperty(validatedFactory, 'type', {
               enumerable: false,
               get: function() {
-                process.env.NODE_ENV !== 'production' ? warning(false, 'Factory.type is deprecated. Access the class directly ' + 'before passing it to createFactory.') : undefined;
+                "production" !== 'production' ? warning(false, 'Factory.type is deprecated. Access the class directly ' + 'before passing it to createFactory.') : undefined;
                 Object.defineProperty(this, 'type', {value: type});
                 return type;
               }
@@ -13380,20 +12733,19 @@ $__System.registerDynamic("dd", ["c7", "80", "d3", "4a", "8f", "d8", "6d", "53",
       }
     };
     module.exports = ReactElementValidator;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("d3", ["49"], true, function($__require, exports, module) {
+$__System.registerDynamic("d5", ["54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
     var ReactPropTypeLocationNames = {};
-    if (process.env.NODE_ENV !== 'production') {
+    if ("production" !== 'production') {
       ReactPropTypeLocationNames = {
         prop: 'prop',
         context: 'context',
@@ -13401,17 +12753,16 @@ $__System.registerDynamic("d3", ["49"], true, function($__require, exports, modu
       };
     }
     module.exports = ReactPropTypeLocationNames;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("d8", [], true, function($__require, exports, module) {
+$__System.registerDynamic("da", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var ITERATOR_SYMBOL = typeof Symbol === 'function' && Symbol.iterator;
   var FAUX_ITERATOR_SYMBOL = '@@iterator';
   function getIteratorFn(maybeIterable) {
@@ -13421,20 +12772,19 @@ $__System.registerDynamic("d8", [], true, function($__require, exports, module) 
     }
   }
   module.exports = getIteratorFn;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("7f", ["c7", "d3", "9a", "d8"], true, function($__require, exports, module) {
+$__System.registerDynamic("81", ["c9", "d5", "9c", "da"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var ReactElement = $__require('c7');
-  var ReactPropTypeLocationNames = $__require('d3');
-  var emptyFunction = $__require('9a');
-  var getIteratorFn = $__require('d8');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var ReactElement = $__require('c9');
+  var ReactPropTypeLocationNames = $__require('d5');
+  var emptyFunction = $__require('9c');
+  var getIteratorFn = $__require('da');
   var ANONYMOUS = '<<anonymous>>';
   var ReactPropTypes = {
     array: createPrimitiveTypeChecker('array'),
@@ -13687,63 +13037,59 @@ $__System.registerDynamic("7f", ["c7", "d3", "9a", "d8"], true, function($__requ
     return propValue.constructor.name;
   }
   module.exports = ReactPropTypes;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("51", [], true, function($__require, exports, module) {
+$__System.registerDynamic("52", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = '0.14.6';
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("4a", [], true, function($__require, exports, module) {
+$__System.registerDynamic("4b", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var ReactCurrentOwner = {current: null};
   module.exports = ReactCurrentOwner;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("8f", ["49"], true, function($__require, exports, module) {
+$__System.registerDynamic("91", ["54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
     var canDefineProperty = false;
-    if (process.env.NODE_ENV !== 'production') {
+    if ("production" !== 'production') {
       try {
         Object.defineProperty({}, 'x', {get: function() {}});
         canDefineProperty = true;
       } catch (x) {}
     }
     module.exports = canDefineProperty;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("c7", ["4a", "57", "8f", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("c9", ["4b", "59", "91", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactCurrentOwner = $__require('4a');
-    var assign = $__require('57');
-    var canDefineProperty = $__require('8f');
+    var ReactCurrentOwner = $__require('4b');
+    var assign = $__require('59');
+    var canDefineProperty = $__require('91');
     var REACT_ELEMENT_TYPE = typeof Symbol === 'function' && Symbol['for'] && Symbol['for']('react.element') || 0xeac7;
     var RESERVED_PROPS = {
       key: true,
@@ -13760,7 +13106,7 @@ $__System.registerDynamic("c7", ["4a", "57", "8f", "49"], true, function($__requ
         props: props,
         _owner: owner
       };
-      if (process.env.NODE_ENV !== 'production') {
+      if ("production" !== 'production') {
         element._store = {};
         if (canDefineProperty) {
           Object.defineProperty(element._store, 'validated', {
@@ -13840,7 +13186,7 @@ $__System.registerDynamic("c7", ["4a", "57", "8f", "49"], true, function($__requ
     };
     ReactElement.cloneAndReplaceProps = function(oldElement, newProps) {
       var newElement = ReactElement(oldElement.type, oldElement.key, oldElement.ref, oldElement._self, oldElement._source, oldElement._owner, newProps);
-      if (process.env.NODE_ENV !== 'production') {
+      if ("production" !== 'production') {
         newElement._store.validated = oldElement._store.validated;
       }
       return newElement;
@@ -13883,20 +13229,19 @@ $__System.registerDynamic("c7", ["4a", "57", "8f", "49"], true, function($__requ
       return typeof object === 'object' && object !== null && object.$$typeof === REACT_ELEMENT_TYPE;
     };
     module.exports = ReactElement;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("6d", ["49"], true, function($__require, exports, module) {
+$__System.registerDynamic("6f", ["54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
     function invariant(condition, format, a, b, c, d, e, f) {
-      if (process.env.NODE_ENV !== 'production') {
+      if ("production" !== 'production') {
         if (format === undefined) {
           throw new Error('invariant requires an error message argument');
         }
@@ -13918,51 +13263,49 @@ $__System.registerDynamic("6d", ["49"], true, function($__require, exports, modu
       }
     }
     module.exports = invariant;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("de", ["c7", "6d", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("e0", ["c9", "6f", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactElement = $__require('c7');
-    var invariant = $__require('6d');
+    var ReactElement = $__require('c9');
+    var invariant = $__require('6f');
     function onlyChild(children) {
-      !ReactElement.isValidElement(children) ? process.env.NODE_ENV !== 'production' ? invariant(false, 'onlyChild must be passed a children with exactly one child.') : invariant(false) : undefined;
+      !ReactElement.isValidElement(children) ? "production" !== 'production' ? invariant(false, 'onlyChild must be passed a children with exactly one child.') : invariant(false) : undefined;
       return children;
     }
     module.exports = onlyChild;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("df", ["7d", "d9", "a2", "dc", "c7", "dd", "7f", "51", "57", "de", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("e1", ["7f", "db", "a4", "de", "c9", "df", "81", "52", "59", "e0", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var ReactChildren = $__require('7d');
-    var ReactComponent = $__require('d9');
-    var ReactClass = $__require('a2');
-    var ReactDOMFactories = $__require('dc');
-    var ReactElement = $__require('c7');
-    var ReactElementValidator = $__require('dd');
-    var ReactPropTypes = $__require('7f');
-    var ReactVersion = $__require('51');
-    var assign = $__require('57');
-    var onlyChild = $__require('de');
+    var ReactChildren = $__require('7f');
+    var ReactComponent = $__require('db');
+    var ReactClass = $__require('a4');
+    var ReactDOMFactories = $__require('de');
+    var ReactElement = $__require('c9');
+    var ReactElementValidator = $__require('df');
+    var ReactPropTypes = $__require('81');
+    var ReactVersion = $__require('52');
+    var assign = $__require('59');
+    var onlyChild = $__require('e0');
     var createElement = ReactElement.createElement;
     var createFactory = ReactElement.createFactory;
     var cloneElement = ReactElement.cloneElement;
-    if (process.env.NODE_ENV !== 'production') {
+    if ("production" !== 'production') {
       createElement = ReactElementValidator.createElement;
       createFactory = ReactElementValidator.createFactory;
       cloneElement = ReactElementValidator.cloneElement;
@@ -13990,17 +13333,16 @@ $__System.registerDynamic("df", ["7d", "d9", "a2", "dc", "c7", "dd", "7f", "51",
       __spread: assign
     };
     module.exports = React;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("57", [], true, function($__require, exports, module) {
+$__System.registerDynamic("59", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   function assign(target, sources) {
     if (target == null) {
       throw new TypeError('Object.assign target cannot be null or undefined');
@@ -14022,16 +13364,15 @@ $__System.registerDynamic("57", [], true, function($__require, exports, module) 
     return to;
   }
   module.exports = assign;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("9a", [], true, function($__require, exports, module) {
+$__System.registerDynamic("9c", [], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   function makeEmptyFunction(arg) {
     return function() {
       return arg;
@@ -14049,20 +13390,19 @@ $__System.registerDynamic("9a", [], true, function($__require, exports, module) 
     return arg;
   };
   module.exports = emptyFunction;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("53", ["9a", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("55", ["9c", "54"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var emptyFunction = $__require('9a');
+    var emptyFunction = $__require('9c');
     var warning = emptyFunction;
-    if (process.env.NODE_ENV !== 'production') {
+    if ("production" !== 'production') {
       warning = function(condition, format) {
         for (var _len = arguments.length,
             args = Array(_len > 2 ? _len - 2 : 0),
@@ -14090,16 +13430,15 @@ $__System.registerDynamic("53", ["9a", "49"], true, function($__require, exports
       };
     }
     module.exports = warning;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("e0", [], true, function($__require, exports, module) {
+$__System.registerDynamic("e2", [], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var process = module.exports = {};
   var queue = [];
   var draining = false;
@@ -14183,54 +13522,50 @@ $__System.registerDynamic("e0", [], true, function($__require, exports, module) 
   process.umask = function() {
     return 0;
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("e1", ["e0"], true, function($__require, exports, module) {
+$__System.registerDynamic("e3", ["e2"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  module.exports = $__require('e0');
-  global.define = __define;
-  return module.exports;
-});
-
-$__System.registerDynamic("e2", ["e1"], true, function($__require, exports, module) {
-  ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  module.exports = $__System._nodeRequire ? process : $__require('e1');
-  global.define = __define;
-  return module.exports;
-});
-
-$__System.registerDynamic("49", ["e2"], true, function($__require, exports, module) {
-  ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = $__require('e2');
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("e3", ["57", "53", "49"], true, function($__require, exports, module) {
+$__System.registerDynamic("e4", ["e3"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
+  module.exports = $__System._nodeRequire ? process : $__require('e3');
+  return module.exports;
+});
+
+$__System.registerDynamic("54", ["e4"], true, function($__require, exports, module) {
+  ;
+  var define,
+      global = this,
+      GLOBAL = this;
+  module.exports = $__require('e4');
+  return module.exports;
+});
+
+$__System.registerDynamic("e5", ["59", "55", "54"], true, function($__require, exports, module) {
+  ;
+  var define,
+      global = this,
+      GLOBAL = this;
   (function(process) {
     'use strict';
-    var assign = $__require('57');
-    var warning = $__require('53');
+    var assign = $__require('59');
+    var warning = $__require('55');
     function deprecated(fnName, newModule, newPackage, ctx, fn) {
       var warned = false;
-      if (process.env.NODE_ENV !== 'production') {
+      if ("production" !== 'production') {
         var newFn = function() {
-          process.env.NODE_ENV !== 'production' ? warning(warned, 'React.%s is deprecated. Please use %s.%s from require' + '(\'%s\') ' + 'instead.', fnName, newModule, fnName, newPackage) : undefined;
+          "production" !== 'production' ? warning(warned, 'React.%s is deprecated. Please use %s.%s from require' + '(\'%s\') ' + 'instead.', fnName, newModule, fnName, newPackage) : undefined;
           warned = true;
           return fn.apply(ctx, arguments);
         };
@@ -14239,22 +13574,21 @@ $__System.registerDynamic("e3", ["57", "53", "49"], true, function($__require, e
       return fn;
     }
     module.exports = deprecated;
-  })($__require('49'));
-  global.define = __define;
+  })($__require('54'));
   return module.exports;
 });
 
-$__System.registerDynamic("e4", ["3", "d7", "df", "57", "e3"], true, function($__require, exports, module) {
+$__System.registerDynamic("e6", ["3", "d9", "e1", "59", "e5"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var ReactDOM = $__require('3');
-  var ReactDOMServer = $__require('d7');
-  var ReactIsomorphic = $__require('df');
-  var assign = $__require('57');
-  var deprecated = $__require('e3');
+  var ReactDOMServer = $__require('d9');
+  var ReactIsomorphic = $__require('e1');
+  var assign = $__require('59');
+  var deprecated = $__require('e5');
   var React = {};
   assign(React, ReactIsomorphic);
   assign(React, {
@@ -14267,32 +13601,29 @@ $__System.registerDynamic("e4", ["3", "d7", "df", "57", "e3"], true, function($_
   React.__SECRET_DOM_DO_NOT_USE_OR_YOU_WILL_BE_FIRED = ReactDOM;
   React.__SECRET_DOM_SERVER_DO_NOT_USE_OR_YOU_WILL_BE_FIRED = ReactDOMServer;
   module.exports = React;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("e5", ["e4"], true, function($__require, exports, module) {
+$__System.registerDynamic("e7", ["e6"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  module.exports = $__require('e4');
-  global.define = __define;
+  var define,
+      global = this,
+      GLOBAL = this;
+  module.exports = $__require('e6');
   return module.exports;
 });
 
-$__System.registerDynamic("3b", ["e5"], true, function($__require, exports, module) {
+$__System.registerDynamic("3d", ["e7"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  module.exports = $__require('e5');
-  global.define = __define;
+  var define,
+      global = this,
+      GLOBAL = this;
+  module.exports = $__require('e7');
   return module.exports;
 });
 
-$__System.register("e6", [], function (_export) {
+$__System.register("e8", [], function (_export) {
   "use strict";
 
   _export("default", elif);
@@ -14308,26 +13639,25 @@ $__System.register("e6", [], function (_export) {
     execute: function () {}
   };
 });
-$__System.registerDynamic("27", ["e7"], true, function($__require, exports, module) {
+$__System.registerDynamic("27", ["e9"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var cof = $__require('e7');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var cof = $__require('e9');
   module.exports = Object('z').propertyIsEnumerable(0) ? Object : function(it) {
     return cof(it) == 'String' ? it.split('') : Object(it);
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("e8", ["19", "e9", "27", "15"], true, function($__require, exports, module) {
+$__System.registerDynamic("ea", ["19", "eb", "27", "15"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var $ = $__require('19'),
-      toObject = $__require('e9'),
+      toObject = $__require('eb'),
       IObject = $__require('27');
   module.exports = $__require('15')(function() {
     var a = Object.assign,
@@ -14360,52 +13690,48 @@ $__System.registerDynamic("e8", ["19", "e9", "27", "15"], true, function($__requ
     }
     return T;
   } : Object.assign;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("ea", ["13", "e8"], true, function($__require, exports, module) {
+$__System.registerDynamic("ec", ["13", "ea"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var $export = $__require('13');
-  $export($export.S + $export.F, 'Object', {assign: $__require('e8')});
-  global.define = __define;
+  $export($export.S + $export.F, 'Object', {assign: $__require('ea')});
   return module.exports;
 });
 
-$__System.registerDynamic("eb", ["ea", "14"], true, function($__require, exports, module) {
+$__System.registerDynamic("ed", ["ec", "14"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  $__require('ea');
+  var define,
+      global = this,
+      GLOBAL = this;
+  $__require('ec');
   module.exports = $__require('14').Object.assign;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("ec", ["eb"], true, function($__require, exports, module) {
+$__System.registerDynamic("ee", ["ed"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = {
-    "default": $__require('eb'),
+    "default": $__require('ed'),
     __esModule: true
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("11", ["ec"], true, function($__require, exports, module) {
+$__System.registerDynamic("11", ["ee"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var _Object$assign = $__require('ec')["default"];
+  var define,
+      global = this,
+      GLOBAL = this;
+  var _Object$assign = $__require('ee')["default"];
   exports["default"] = _Object$assign || function(target) {
     for (var i = 1; i < arguments.length; i++) {
       var source = arguments[i];
@@ -14418,42 +13744,39 @@ $__System.registerDynamic("11", ["ec"], true, function($__require, exports, modu
     return target;
   };
   exports.__esModule = true;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("ed", ["19"], true, function($__require, exports, module) {
+$__System.registerDynamic("ef", ["19"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var $ = $__require('19');
   module.exports = function defineProperty(it, key, desc) {
     return $.setDesc(it, key, desc);
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("6", ["ed"], true, function($__require, exports, module) {
+$__System.registerDynamic("6", ["ef"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = {
-    "default": $__require('ed'),
+    "default": $__require('ef'),
     __esModule: true
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("ee", ["6"], true, function($__require, exports, module) {
+$__System.registerDynamic("f0", ["6"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var _Object$defineProperty = $__require('6')["default"];
   exports["default"] = function(obj, key, value) {
     if (key in obj) {
@@ -14469,16 +13792,15 @@ $__System.registerDynamic("ee", ["6"], true, function($__require, exports, modul
     return obj;
   };
   exports.__esModule = true;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("ef", ["f0", "28"], true, function($__require, exports, module) {
+$__System.registerDynamic("f1", ["f2", "28"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var toInteger = $__require('f0'),
+  var define,
+      global = this,
+      GLOBAL = this;
+  var toInteger = $__require('f2'),
       defined = $__require('28');
   module.exports = function(TO_STRING) {
     return function(that, pos) {
@@ -14493,35 +13815,32 @@ $__System.registerDynamic("ef", ["f0", "28"], true, function($__require, exports
       return a < 0xd800 || a > 0xdbff || i + 1 === l || (b = s.charCodeAt(i + 1)) < 0xdc00 || b > 0xdfff ? TO_STRING ? s.charAt(i) : a : TO_STRING ? s.slice(i, i + 2) : (a - 0xd800 << 10) + (b - 0xdc00) + 0x10000;
     };
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("f1", [], true, function($__require, exports, module) {
+$__System.registerDynamic("f3", [], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = true;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("f2", ["f3"], true, function($__require, exports, module) {
+$__System.registerDynamic("f4", ["f5"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  module.exports = $__require('f3');
-  global.define = __define;
+  var define,
+      global = this,
+      GLOBAL = this;
+  module.exports = $__require('f5');
   return module.exports;
 });
 
-$__System.registerDynamic("f4", [], true, function($__require, exports, module) {
+$__System.registerDynamic("f6", [], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = function(bitmap, value) {
     return {
       enumerable: !(bitmap & 1),
@@ -14530,15 +13849,14 @@ $__System.registerDynamic("f4", [], true, function($__require, exports, module) 
       value: value
     };
   };
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("15", [], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = function(exec) {
     try {
       return !!exec();
@@ -14546,83 +13864,78 @@ $__System.registerDynamic("15", [], true, function($__require, exports, module) 
       return true;
     }
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("f5", ["15"], true, function($__require, exports, module) {
+$__System.registerDynamic("f7", ["15"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = !$__require('15')(function() {
     return Object.defineProperty({}, 'a', {get: function() {
         return 7;
       }}).a != 7;
   });
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("f3", ["19", "f4", "f5"], true, function($__require, exports, module) {
+$__System.registerDynamic("f5", ["19", "f6", "f7"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var $ = $__require('19'),
-      createDesc = $__require('f4');
-  module.exports = $__require('f5') ? function(object, key, value) {
+      createDesc = $__require('f6');
+  module.exports = $__require('f7') ? function(object, key, value) {
     return $.setDesc(object, key, createDesc(1, value));
   } : function(object, key, value) {
     object[key] = value;
     return object;
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("f6", ["19", "f4", "f7", "f3", "f8"], true, function($__require, exports, module) {
+$__System.registerDynamic("f8", ["19", "f6", "f9", "f5", "fa"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var $ = $__require('19'),
-      descriptor = $__require('f4'),
-      setToStringTag = $__require('f7'),
+      descriptor = $__require('f6'),
+      setToStringTag = $__require('f9'),
       IteratorPrototype = {};
-  $__require('f3')(IteratorPrototype, $__require('f8')('iterator'), function() {
+  $__require('f5')(IteratorPrototype, $__require('fa')('iterator'), function() {
     return this;
   });
   module.exports = function(Constructor, NAME, next) {
     Constructor.prototype = $.create(IteratorPrototype, {next: descriptor(1, next)});
     setToStringTag(Constructor, NAME + ' Iterator');
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("f9", [], true, function($__require, exports, module) {
+$__System.registerDynamic("fb", [], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var hasOwnProperty = {}.hasOwnProperty;
   module.exports = function(it, key) {
     return hasOwnProperty.call(it, key);
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("f7", ["19", "f9", "f8"], true, function($__require, exports, module) {
+$__System.registerDynamic("f9", ["19", "fb", "fa"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var def = $__require('19').setDesc,
-      has = $__require('f9'),
-      TAG = $__require('f8')('toStringTag');
+      has = $__require('fb'),
+      TAG = $__require('fa')('toStringTag');
   module.exports = function(it, tag, stat) {
     if (it && !has(it = stat ? it : it.prototype, TAG))
       def(it, TAG, {
@@ -14630,15 +13943,14 @@ $__System.registerDynamic("f7", ["19", "f9", "f8"], true, function($__require, e
         value: tag
       });
   };
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("19", [], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var $Object = Object;
   module.exports = {
     create: $Object.create,
@@ -14652,26 +13964,25 @@ $__System.registerDynamic("19", [], true, function($__require, exports, module) 
     getSymbols: $Object.getOwnPropertySymbols,
     each: [].forEach
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("2b", ["f1", "13", "f2", "f3", "f9", "2a", "f6", "f7", "19", "f8"], true, function($__require, exports, module) {
+$__System.registerDynamic("2b", ["f3", "13", "f4", "f5", "fb", "2a", "f8", "f9", "19", "fa"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var LIBRARY = $__require('f1'),
+  var define,
+      global = this,
+      GLOBAL = this;
+  var LIBRARY = $__require('f3'),
       $export = $__require('13'),
-      redefine = $__require('f2'),
-      hide = $__require('f3'),
-      has = $__require('f9'),
+      redefine = $__require('f4'),
+      hide = $__require('f5'),
+      has = $__require('fb'),
       Iterators = $__require('2a'),
-      $iterCreate = $__require('f6'),
-      setToStringTag = $__require('f7'),
+      $iterCreate = $__require('f8'),
+      setToStringTag = $__require('f9'),
       getProto = $__require('19').getProto,
-      ITERATOR = $__require('f8')('iterator'),
+      ITERATOR = $__require('fa')('iterator'),
       BUGGY = !([].keys && 'next' in [].keys()),
       FF_ITERATOR = '@@iterator',
       KEYS = 'keys',
@@ -14739,17 +14050,16 @@ $__System.registerDynamic("2b", ["f1", "13", "f2", "f3", "f9", "2a", "f6", "f7",
     }
     return methods;
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("30", ["ef", "2b"], true, function($__require, exports, module) {
+$__System.registerDynamic("30", ["f1", "2b"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var $at = $__require('ef')(true);
+  var define,
+      global = this,
+      GLOBAL = this;
+  var $at = $__require('f1')(true);
   $__require('2b')(String, 'String', function(iterated) {
     this._t = String(iterated);
     this._i = 0;
@@ -14769,30 +14079,28 @@ $__System.registerDynamic("30", ["ef", "2b"], true, function($__require, exports
       done: false
     };
   });
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("fa", [], true, function($__require, exports, module) {
+$__System.registerDynamic("fc", [], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = function(it) {
     if (typeof it != 'function')
       throw TypeError(it + ' is not a function!');
     return it;
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("20", ["fa"], true, function($__require, exports, module) {
+$__System.registerDynamic("20", ["fc"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var aFunction = $__require('fa');
+  var define,
+      global = this,
+      GLOBAL = this;
+  var aFunction = $__require('fc');
   module.exports = function(fn, that, length) {
     aFunction(fn);
     if (that === undefined)
@@ -14815,16 +14123,15 @@ $__System.registerDynamic("20", ["fa"], true, function($__require, exports, modu
       return fn.apply(that, arguments);
     };
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("13", ["fb", "14", "20"], true, function($__require, exports, module) {
+$__System.registerDynamic("13", ["fd", "14", "20"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var global = $__require('fb'),
+  var define,
+      global = this,
+      GLOBAL = this;
+  var global = $__require('fd'),
       core = $__require('14'),
       ctx = $__require('20'),
       PROTOTYPE = 'prototype';
@@ -14865,69 +14172,64 @@ $__System.registerDynamic("13", ["fb", "14", "20"], true, function($__require, e
   $export.B = 16;
   $export.W = 32;
   module.exports = $export;
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("28", [], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = function(it) {
     if (it == undefined)
       throw TypeError("Can't call method on  " + it);
     return it;
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("e9", ["28"], true, function($__require, exports, module) {
+$__System.registerDynamic("eb", ["28"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var defined = $__require('28');
   module.exports = function(it) {
     return Object(defined(it));
   };
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("1e", [], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = function(it) {
     return typeof it === 'object' ? it !== null : typeof it === 'function';
   };
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("1f", ["1e"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var isObject = $__require('1e');
   module.exports = function(it) {
     if (!isObject(it))
       throw TypeError(it + ' is not an object!');
     return it;
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("fc", ["1f"], true, function($__require, exports, module) {
+$__System.registerDynamic("fe", ["1f"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var anObject = $__require('1f');
   module.exports = function(iterator, fn, value, entries) {
     try {
@@ -14939,73 +14241,68 @@ $__System.registerDynamic("fc", ["1f"], true, function($__require, exports, modu
       throw e;
     }
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("fd", ["2a", "f8"], true, function($__require, exports, module) {
+$__System.registerDynamic("ff", ["2a", "fa"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var Iterators = $__require('2a'),
-      ITERATOR = $__require('f8')('iterator'),
+      ITERATOR = $__require('fa')('iterator'),
       ArrayProto = Array.prototype;
   module.exports = function(it) {
     return it !== undefined && (Iterators.Array === it || ArrayProto[ITERATOR] === it);
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("f0", [], true, function($__require, exports, module) {
+$__System.registerDynamic("f2", [], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var ceil = Math.ceil,
       floor = Math.floor;
   module.exports = function(it) {
     return isNaN(it = +it) ? 0 : (it > 0 ? floor : ceil)(it);
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("fe", ["f0"], true, function($__require, exports, module) {
+$__System.registerDynamic("100", ["f2"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var toInteger = $__require('f0'),
+  var define,
+      global = this,
+      GLOBAL = this;
+  var toInteger = $__require('f2'),
       min = Math.min;
   module.exports = function(it) {
     return it > 0 ? min(toInteger(it), 0x1fffffffffffff) : 0;
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("e7", [], true, function($__require, exports, module) {
+$__System.registerDynamic("e9", [], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var toString = {}.toString;
   module.exports = function(it) {
     return toString.call(it).slice(8, -1);
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("ff", ["e7", "f8"], true, function($__require, exports, module) {
+$__System.registerDynamic("101", ["e9", "fa"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var cof = $__require('e7'),
-      TAG = $__require('f8')('toStringTag'),
+  var define,
+      global = this,
+      GLOBAL = this;
+  var cof = $__require('e9'),
+      TAG = $__require('fa')('toStringTag'),
       ARG = cof(function() {
         return arguments;
       }()) == 'Arguments';
@@ -15015,98 +14312,91 @@ $__System.registerDynamic("ff", ["e7", "f8"], true, function($__require, exports
         B;
     return it === undefined ? 'Undefined' : it === null ? 'Null' : typeof(T = (O = Object(it))[TAG]) == 'string' ? T : ARG ? cof(O) : (B = cof(O)) == 'Object' && typeof O.callee == 'function' ? 'Arguments' : B;
   };
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("2a", [], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = {};
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("2e", ["ff", "f8", "2a", "14"], true, function($__require, exports, module) {
+$__System.registerDynamic("2e", ["101", "fa", "2a", "14"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var classof = $__require('ff'),
-      ITERATOR = $__require('f8')('iterator'),
+  var define,
+      global = this,
+      GLOBAL = this;
+  var classof = $__require('101'),
+      ITERATOR = $__require('fa')('iterator'),
       Iterators = $__require('2a');
   module.exports = $__require('14').getIteratorMethod = function(it) {
     if (it != undefined)
       return it[ITERATOR] || it['@@iterator'] || Iterators[classof(it)];
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("100", ["fb"], true, function($__require, exports, module) {
+$__System.registerDynamic("102", ["fd"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var global = $__require('fb'),
+  var define,
+      global = this,
+      GLOBAL = this;
+  var global = $__require('fd'),
       SHARED = '__core-js_shared__',
       store = global[SHARED] || (global[SHARED] = {});
   module.exports = function(key) {
     return store[key] || (store[key] = {});
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("101", [], true, function($__require, exports, module) {
+$__System.registerDynamic("103", [], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var id = 0,
       px = Math.random();
   module.exports = function(key) {
     return 'Symbol('.concat(key === undefined ? '' : key, ')_', (++id + px).toString(36));
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("fb", [], true, function($__require, exports, module) {
+$__System.registerDynamic("fd", [], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var global = module.exports = typeof window != 'undefined' && window.Math == Math ? window : typeof self != 'undefined' && self.Math == Math ? self : Function('return this')();
   if (typeof __g == 'number')
     __g = global;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("f8", ["100", "101", "fb"], true, function($__require, exports, module) {
+$__System.registerDynamic("fa", ["102", "103", "fd"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var store = $__require('100')('wks'),
-      uid = $__require('101'),
-      Symbol = $__require('fb').Symbol;
+  var define,
+      global = this,
+      GLOBAL = this;
+  var store = $__require('102')('wks'),
+      uid = $__require('103'),
+      Symbol = $__require('fd').Symbol;
   module.exports = function(name) {
     return store[name] || (store[name] = Symbol && Symbol[name] || (Symbol || uid)('Symbol.' + name));
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("102", ["f8"], true, function($__require, exports, module) {
+$__System.registerDynamic("104", ["fa"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var ITERATOR = $__require('f8')('iterator'),
+  var define,
+      global = this,
+      GLOBAL = this;
+  var ITERATOR = $__require('fa')('iterator'),
       SAFE_CLOSING = false;
   try {
     var riter = [7][ITERATOR]();
@@ -15134,24 +14424,23 @@ $__System.registerDynamic("102", ["f8"], true, function($__require, exports, mod
     } catch (e) {}
     return safe;
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("103", ["20", "13", "e9", "fc", "fd", "fe", "2e", "102"], true, function($__require, exports, module) {
+$__System.registerDynamic("105", ["20", "13", "eb", "fe", "ff", "100", "2e", "104"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var ctx = $__require('20'),
       $export = $__require('13'),
-      toObject = $__require('e9'),
-      call = $__require('fc'),
-      isArrayIter = $__require('fd'),
-      toLength = $__require('fe'),
+      toObject = $__require('eb'),
+      call = $__require('fe'),
+      isArrayIter = $__require('ff'),
+      toLength = $__require('100'),
       getIterFn = $__require('2e');
-  $export($export.S + $export.F * !$__require('102')(function(iter) {
+  $export($export.S + $export.F * !$__require('104')(function(iter) {
     Array.from(iter);
   }), 'Array', {from: function from(arrayLike) {
       var O = toObject(arrayLike),
@@ -15181,54 +14470,50 @@ $__System.registerDynamic("103", ["20", "13", "e9", "fc", "fd", "fe", "2e", "102
       result.length = index;
       return result;
     }});
-  global.define = __define;
   return module.exports;
 });
 
 $__System.registerDynamic("14", [], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   var core = module.exports = {version: '1.2.6'};
   if (typeof __e == 'number')
     __e = core;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("104", ["30", "103", "14"], true, function($__require, exports, module) {
+$__System.registerDynamic("106", ["30", "105", "14"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   $__require('30');
-  $__require('103');
+  $__require('105');
   module.exports = $__require('14').Array.from;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("105", ["104"], true, function($__require, exports, module) {
+$__System.registerDynamic("107", ["106"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   module.exports = {
-    "default": $__require('104'),
+    "default": $__require('106'),
     __esModule: true
   };
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("f", ["105"], true, function($__require, exports, module) {
+$__System.registerDynamic("f", ["107"], true, function($__require, exports, module) {
   "use strict";
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  var _Array$from = $__require('105')["default"];
+  var define,
+      global = this,
+      GLOBAL = this;
+  var _Array$from = $__require('107')["default"];
   exports["default"] = function(arr) {
     if (Array.isArray(arr)) {
       for (var i = 0,
@@ -15240,11 +14525,10 @@ $__System.registerDynamic("f", ["105"], true, function($__require, exports, modu
     }
   };
   exports.__esModule = true;
-  global.define = __define;
   return module.exports;
 });
 
-$__System.register('106', [], function (_export) {
+$__System.register('108', [], function (_export) {
   /**
    * Returns true if the value can be used as a React component.
    *
@@ -15279,7 +14563,7 @@ $__System.register('106', [], function (_export) {
     execute: function () {}
   };
 });
-$__System.register('107', ['106', 'f'], function (_export) {
+$__System.register('109', ['108', 'f'], function (_export) {
   var isComponent, _toConsumableArray;
 
   /**
@@ -15356,7 +14640,7 @@ $__System.register('107', ['106', 'f'], function (_export) {
     }
   };
 });
-$__System.register('108', ['11', '107', 'ee'], function (_export) {
+$__System.register('10a', ['11', '109', 'f0'], function (_export) {
   var _extends, el, _defineProperty;
 
   /**
@@ -15413,8 +14697,8 @@ $__System.register('108', ['11', '107', 'ee'], function (_export) {
       _extends = _['default'];
     }, function (_2) {
       el = _2['default'];
-    }, function (_ee) {
-      _defineProperty = _ee['default'];
+    }, function (_f0) {
+      _defineProperty = _f0['default'];
     }],
     execute: function () {
       'use strict';
@@ -15423,7 +14707,7 @@ $__System.register('108', ['11', '107', 'ee'], function (_export) {
     }
   };
 });
-$__System.register('109', ['107', '108', 'e6'], function (_export) {
+$__System.register('10b', ['109', 'e8', '10a'], function (_export) {
 
   /**
    * A handy element creator factory function!
@@ -15452,7 +14736,7 @@ $__System.register('109', ['107', '108', 'e6'], function (_export) {
    */
   'use strict';
 
-  var el, factory, elif;
+  var el, elif, factory;
   function dom(React) {
     for (var _len = arguments.length, types = Array(_len > 1 ? _len - 1 : 0), _key = 1; _key < _len; _key++) {
       types[_key - 1] = arguments[_key];
@@ -15473,10 +14757,10 @@ $__System.register('109', ['107', '108', 'e6'], function (_export) {
   }return {
     setters: [function (_) {
       el = _['default'];
-    }, function (_2) {
-      factory = _2['default'];
-    }, function (_e6) {
-      elif = _e6['default'];
+    }, function (_e8) {
+      elif = _e8['default'];
+    }, function (_a) {
+      factory = _a['default'];
     }],
     execute: function () {
       ;
@@ -15489,29 +14773,29 @@ $__System.register('109', ['107', '108', 'e6'], function (_export) {
     }
   };
 });
-$__System.register("3d", ["109"], function (_export) {
+$__System.register("3c", ["10b"], function (_export) {
   "use strict";
 
   return {
-    setters: [function (_) {
+    setters: [function (_b) {
       var _exportObj = {};
 
-      for (var _key in _) {
-        if (_key !== "default") _exportObj[_key] = _[_key];
+      for (var _key in _b) {
+        if (_key !== "default") _exportObj[_key] = _b[_key];
       }
 
-      _exportObj["default"] = _["default"];
+      _exportObj["default"] = _b["default"];
 
       _export(_exportObj);
     }],
     execute: function () {}
   };
 });
-$__System.registerDynamic("10a", [], true, function($__require, exports, module) {
+$__System.registerDynamic("10c", [], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
+  var define,
+      global = this,
+      GLOBAL = this;
   "format cjs";
   (function() {
     'use strict';
@@ -15547,22 +14831,154 @@ $__System.registerDynamic("10a", [], true, function($__require, exports, module)
       window.classNames = classNames;
     }
   }());
-  global.define = __define;
   return module.exports;
 });
 
-$__System.registerDynamic("3c", ["10a"], true, function($__require, exports, module) {
+$__System.registerDynamic("3b", ["10c"], true, function($__require, exports, module) {
   ;
-  var global = this,
-      __define = global.define;
-  global.define = undefined;
-  module.exports = $__require('10a');
-  global.define = __define;
+  var define,
+      global = this,
+      GLOBAL = this;
+  module.exports = $__require('10c');
   return module.exports;
 });
 
-$__System.register('10b', ['f', '3b', '3d', '3c'], function (_export) {
-  var _toConsumableArray, React, dom, classnames, div, button, basename;
+$__System.register('10d', ['3d', '3c', '3b'], function (_export) {
+  'use strict';
+
+  var React, dom, elif, classnames, div, button;
+
+  _export('default', ListItemView);
+
+  function ListItemView(props) {
+    var icon = elif(props.icon, div);
+    var subtitle = elif(props.subtitle, div);
+    var actions = elif(props.actions, div);
+    var progress = elif(props.progress !== undefined, div);
+
+    return div({
+      key: props.key,
+      className: classnames('listitem', props.className),
+
+      content: [icon({
+        className: 'listitem-icon'
+      }), div({
+        className: 'listitem-details',
+        content: [div({
+          className: 'listitem-details-title',
+          content: props.title
+        }), subtitle({
+          className: 'listitem-details-subtitle',
+          content: props.subtitle
+        })]
+      }), actions({
+        className: 'listitem-actions',
+        content: props.actions.map(function (action) {
+          return button({
+            className: 'listitem-action',
+            content: action.name,
+            onClick: action.handler
+          });
+        })
+      }), progress({
+        className: 'listitem-progress',
+        content: div({
+          className: 'listitem-progress-bar',
+          style: { width: props.progress * 100 + '%' }
+        })
+      })]
+    });
+  }
+
+  return {
+    setters: [function (_d) {
+      React = _d['default'];
+    }, function (_c) {
+      dom = _c.dom;
+      elif = _c.elif;
+    }, function (_b) {
+      classnames = _b['default'];
+    }],
+    execute: function () {
+      div = dom(React, 'div');
+      button = dom(React, 'button');
+    }
+  };
+});
+$__System.register('10e', ['48', '3d', '3c', '3b', '10d'], function (_export) {
+  'use strict';
+
+  var filesize, React, dom, elif, classnames, ListItemView, div, listItem;
+
+  _export('default', Queue);
+
+  function basename(str) {
+    return str.substr(str.lastIndexOf('/') + 1);
+  }
+
+  function queueItemStatus(item) {
+    if (item.failed) return 'Failed';
+    if (item.canceled) return 'Canceled';
+    if (item.completed) return 'Completed';
+    if (queueItemIsActive(item)) return 'Downloading';
+    return 'Queued';
+  }
+
+  function queueItemIsActive(item) {
+    return item.transferred > 0 && !item.failed && !item.canceled && !item.completed;
+  }
+
+  function queueItemActions(app, item) {
+    if (!item.failed && !item.canceled && !item.completed) {
+      return [{ name: 'Cancel', handler: function handler(event) {
+          return app.cancelTransfer(item);
+        } }];
+    } else {
+      return [];
+    }
+  }
+
+  function queueItemSubtitle(item) {
+    var isActive = queueItemIsActive(item);
+    var percentage = (item.transferred / item.size * 100).toFixed(2);
+
+    return [
+    // Status
+    div({
+      className: 'queue-item-status',
+      content: queueItemStatus(item)
+    }),
+
+    // Percent
+    elif(percentage > 0 && percentage != 100, div)({
+      className: 'queue-item-percent',
+      content: percentage + '%'
+    }),
+
+    // Transferred - active download
+    elif(isActive && !item.completed, div)({
+      className: 'queue-item-filesize',
+      content: filesize(item.transferred) + ' of ' + filesize(item.size)
+    }),
+
+    // Transferred - completed
+    elif(item.transferred && !isActive && item.completed && !item.canceled && !item.failed, div)({
+      className: 'queue-item-filesize',
+      content: filesize(item.size)
+    }),
+
+    // Transferred - other
+    elif(item.transferred && !isActive && (item.canceled || item.failed), div)({
+      className: 'queue-item-filesize',
+      content: filesize(item.transferred)
+    }),
+
+    // Rate
+    elif(isActive, div)({
+      className: 'queue-item-rate',
+      content: item.rate + '/s'
+    })];
+  }
 
   function Queue(_ref) {
     var app = _ref.app;
@@ -15570,55 +14986,45 @@ $__System.register('10b', ['f', '3b', '3d', '3c'], function (_export) {
 
     return div({
       className: 'queue',
-      children: [].concat(_toConsumableArray(queue.state.map(function (item) {
-        return div({
+      children: queue.state.map(function (item) {
+        return listItem({
           key: 'queue-' + item.id,
+          title: basename(item.path),
+          progress: queueItemIsActive(item) ? item.progress : undefined,
+          actions: queueItemActions(app, item),
+          subtitle: queueItemSubtitle(item),
           className: classnames('queue-item', {
-            'is-complete': item.completed,
-            'is-fail': item.failed
-          }),
-          content: [div({
-            className: 'queue-item-label',
-            content: basename(item.path) + ' ' + item.rate + '/s'
-          }), button({
-            content: 'Cancel',
-            onClick: function onClick(event) {
-              return app.cancelTransfer(item);
-            }
-          }), div({
-            className: 'queue-item-progress',
-            style: { width: item.progress * 100 + '%' }
-          })]
+            'failed': item.failed,
+            'canceled': item.canceled,
+            'completed': item.completed,
+            'active': queueItemIsActive(item)
+          })
         });
-      })))
+      })
     });
   }
 
   return {
-    setters: [function (_f) {
-      _toConsumableArray = _f['default'];
-    }, function (_b) {
-      React = _b['default'];
+    setters: [function (_) {
+      filesize = _['default'];
     }, function (_d) {
-      dom = _d.dom;
+      React = _d['default'];
     }, function (_c) {
-      classnames = _c['default'];
+      dom = _c.dom;
+      elif = _c.elif;
+    }, function (_b) {
+      classnames = _b['default'];
+    }, function (_d2) {
+      ListItemView = _d2['default'];
     }],
     execute: function () {
-      'use strict';
-
-      _export('default', Queue);
-
       div = dom(React, 'div');
-      button = dom(React, 'button');
-
-      basename = function basename(str) {
-        return str.substr(str.lastIndexOf('/') + 1);
-      };
+      listItem = dom(React, ListItemView);
+      ;
     }
   };
 });
-$__System.register('10c', ['41', '42', '46', '3b', '3d', '3e', '10b'], function (_export) {
+$__System.register('10f', ['41', '42', '46', '3d', '3c', '3e', '10e'], function (_export) {
   'use strict';
 
   var BookmarkList, BookmarkForm, Connection, React, dom, elif, Tabbar, Queue;
@@ -15629,15 +15035,15 @@ $__System.register('10c', ['41', '42', '46', '3b', '3d', '3e', '10b'], function 
       BookmarkForm = _2['default'];
     }, function (_3) {
       Connection = _3['default'];
-    }, function (_b) {
-      React = _b['default'];
     }, function (_d) {
-      dom = _d.dom;
-      elif = _d.elif;
+      React = _d['default'];
+    }, function (_c) {
+      dom = _c.dom;
+      elif = _c.elif;
     }, function (_e) {
       Tabbar = _e['default'];
-    }, function (_b2) {
-      Queue = _b2['default'];
+    }, function (_e2) {
+      Queue = _e2['default'];
     }],
     execute: function () {
       _export('default', function (_ref) {
@@ -15664,7 +15070,7 @@ $__System.register('10c', ['41', '42', '46', '3b', '3d', '3e', '10b'], function 
     }
   };
 });
-$__System.register('1', ['4', '39', '3b', '10c'], function (_export) {
+$__System.register('1', ['4', '39', '3d', '10f'], function (_export) {
   'use strict';
 
   var ReactDOM, Application, React, ApplicationView, app;
@@ -15673,10 +15079,10 @@ $__System.register('1', ['4', '39', '3b', '10c'], function (_export) {
       ReactDOM = _['default'];
     }, function (_2) {
       Application = _2['default'];
-    }, function (_b) {
-      React = _b['default'];
-    }, function (_c) {
-      ApplicationView = _c['default'];
+    }, function (_d) {
+      React = _d['default'];
+    }, function (_f) {
+      ApplicationView = _f['default'];
     }],
     execute: function () {
       app = new Application();
