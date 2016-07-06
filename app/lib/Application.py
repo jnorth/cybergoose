@@ -1,6 +1,6 @@
-from Client import Client
-from Transfer import Transfer
-from TransferManager import TransferManager
+from .Client import Client
+from .Transfer import Transfer
+from .TransferManager import TransferManager
 
 class Application:
   def __init__(self, db):

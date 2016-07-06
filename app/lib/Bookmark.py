@@ -2,7 +2,7 @@ import uuid
 
 class Bookmark:
   def __init__(self, id=None, name="Untitled", host=None, port=22, username=None, password=None, path="."):
-    self.id = id if id else unicode(str(uuid.uuid4()), "utf-8")
+    self.id = id if id else str(uuid.uuid4())
     self.name = name
     self.host = host
     self.username = username

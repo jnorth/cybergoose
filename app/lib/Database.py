@@ -1,7 +1,7 @@
 import json
 import dpath
 
-from Bookmark import Bookmark
+from .Bookmark import Bookmark
 
 class Database:
   def __init__(self, path):
@@ -14,7 +14,7 @@ class Database:
         self.db = json.load(file)
     except (IOError, ValueError) as e:
       self.db = {}
-      print e
+      print(e)
 
   def save(self):
     with open(self.path, 'w') as file:

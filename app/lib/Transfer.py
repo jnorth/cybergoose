@@ -1,10 +1,10 @@
 import os
 import uuid
-from Client import Client
+from .Client import Client
 
 class Transfer:
   def __init__(self, bookmark=None, base_path=None, path=None):
-    self.id = unicode(str(uuid.uuid4()), "utf-8")
+    self.id = str(uuid.uuid4())
     self.bookmark = bookmark
     self.base_path = base_path
     self.path = path

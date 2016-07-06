@@ -1,13 +1,11 @@
-from __future__ import division
-
 import os
 import errno
 import time
 import uuid
 import threading
-from Client import Client
 import sys
 import hashlib
+from .Client import Client
 
 class Worker(threading.Thread):
   def __init__(self, queue):
@@ -23,10 +21,10 @@ class Worker(threading.Thread):
     return self.current_transfer
 
   def run(self):
-    print "starting worker {0}".format(self.id)
+    print("starting worker {0}".format(self.id))
 
     while not self.stop_event.isSet():
-      transfer = self.queue.next()
+      transfer = next(self.queue)
 
       if transfer:
         if transfer.is_ready():
@@ -38,7 +36,7 @@ class Worker(threading.Thread):
       self.stop_event.wait(self.sleep_period)
 
   def stop(self, timeout=None):
-    print "stopping worker {0}".format(self.id)
+    print("stopping worker {0}".format(self.id))
     self.stop_event.set()
     threading.Thread.join(self, timeout)
 
@@ -48,7 +46,7 @@ class Worker(threading.Thread):
     self.start_time = 0 if transfer is None else time.time()
 
   def process(self, transfer):
-    print "transfering {}".format(transfer.to_json())
+    print("transfering {}".format(transfer.to_json()))
 
     remote_path = transfer.get_remote_path()
     local_path = os.path.join("/data", transfer.get_path())
@@ -75,10 +73,10 @@ class Worker(threading.Thread):
       remote_hash = client.hash_file(remote_path)
       local_hash = self.hash_file(local_path)
       transfer.verified = remote_hash != "" and local_hash == remote_hash
-      print "transfer:checkhash {} {}".format(remote_hash, local_hash)
+      print("transfer:checkhash {} {}".format(remote_hash, local_hash))
 
     except Exception as e:
-      print "transfer:failed {}".format(e)
+      print("transfer:failed {}".format(e))
       failed = True
 
     client.close()
@@ -87,7 +85,7 @@ class Worker(threading.Thread):
     transfer.complete(failed=failed)
     self.queue.complete(transfer)
 
-    print "transferred {}".format(transfer.to_json())
+    print("transferred {}".format(transfer.to_json()))
 
   def hash_file(self, local_path):
     BUF_SIZE = 65536 # 64kb
@@ -117,12 +115,12 @@ class Worker(threading.Thread):
     if self.current_transfer.canceled:
       return True
 
-    print "transfer {0} {1:.0f}% of {2} {3}/s".format(
+    print("transfer {0} {1:.0f}% of {2} {3}/s".format(
       os.path.basename(self.current_transfer.path),
       percent * 100,
       self.size(total_bytes),
       self.size(self.rate),
-    )
+    ))
 
   def size(self, num, suffix="B"):
     for unit in ['','K','M','G','T','P','E','Z']:

@@ -6,10 +6,10 @@ apt-get update && apt-get install -y \
   avahi-daemon \
   libffi-dev \
   libssl-dev \
-  python-dev \
-  python-pip
+  python3-dev \
+  python3-pip
 
-pip install --upgrade \
+pip3 install --upgrade \
   pip \
   bottle \
   dpath \

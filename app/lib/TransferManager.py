@@ -1,5 +1,5 @@
-from Queue import Queue
-from Worker import Worker
+from queue import Queue
+from .Worker import Worker
 
 # TODO: use deque?
 # https://docs.python.org/2/library/collections.html#collections.deque
@@ -20,7 +20,7 @@ class TransferManager:
   def all(self):
     return self.active + [item for item in self.queue.queue] + self.completed
 
-  def next(self):
+  def __next__(self):
     if self.queue.empty():
       return None
 

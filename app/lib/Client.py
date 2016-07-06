@@ -3,7 +3,7 @@ import stat
 import paramiko
 from math import ceil
 
-from Resource import Resource
+from .Resource import Resource
 
 class Client:
   def __init__(self, bookmark):
@@ -21,7 +21,7 @@ class Client:
     if self.is_open():
       return
 
-    print "client:open {}".format(self.bookmark.host)
+    print("client:open {}".format(self.bookmark.host))
     self.transport = paramiko.Transport((self.bookmark.host, self.bookmark.port))
     self.transport.connect(username=self.bookmark.username, password=self.bookmark.password)
     self.transport.window_size = 5 * 1024 * 1024
@@ -29,19 +29,19 @@ class Client:
     self.sftp.chdir(".")
 
   def close(self):
-    print "client:close {}".format(self.bookmark.host)
+    print("client:close {}".format(self.bookmark.host))
     if self.sftp: self.sftp.close()
     if self.transport: self.transport.close()
 
   def list_dir(self, path="."):
-    print "client:list_dir {} {}".format(self.bookmark.host, path)
+    print("client:list_dir {} {}".format(self.bookmark.host, path))
     self.open()
     base_path = os.path.normpath(os.path.join(self.sftp.getcwd(), path))
     listing = self.sftp.listdir_attr(base_path)
     return [base_path, [Resource.from_attributes(base_path, attributes) for attributes in listing]]
 
   def walk_dir(self, base_path="."):
-    print "client:list_dir {} {}".format(self.bookmark.host, base_path)
+    print("client:list_dir {} {}".format(self.bookmark.host, base_path))
     self.open()
 
     path = os.path.normpath(os.path.join(self.sftp.getcwd(), base_path))
@@ -66,7 +66,7 @@ class Client:
     return files
 
   def hash_file(self, remote_path):
-    print "client:hash_file {} {}".format(self.bookmark.host, remote_path)
+    print("client:hash_file {} {}".format(self.bookmark.host, remote_path))
     self.open()
 
     hash = ""
@@ -75,12 +75,12 @@ class Client:
       try:
         hash = remote_file.check("sha1")
       except Exception as e:
-        print "client:hash_file exception {}".format(e)
+        print("client:hash_file exception {}".format(e))
 
     return hash
 
   def download_file(self, remote_path, local_path, callback=None, buffer=32768, prefetch=50):
-    print "client:download {} {}".format(self.bookmark.host, remote_path)
+    print("client:download {} {}".format(self.bookmark.host, remote_path))
     self.open()
 
     # Open local file
@@ -110,4 +110,4 @@ class Client:
   def next_chunks(self, total_bytes, offset, chunk_size, chunk_count):
     chunks_remaining = int(ceil(float(total_bytes - offset) / chunk_size))
     num = min(chunk_count, chunks_remaining)
-    return [(offset + (chunk_size * i), chunk_size) for i in xrange(num)]
+    return [(offset + (chunk_size * i), chunk_size) for i in range(num)]
