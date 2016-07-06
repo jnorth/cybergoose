@@ -6,6 +6,8 @@ import time
 import uuid
 import threading
 from Client import Client
+import sys
+import hashlib
 
 class Worker(threading.Thread):
   def __init__(self, queue):
@@ -63,14 +65,43 @@ class Worker(threading.Thread):
 
     self.init_transfer(transfer)
     client = Client(transfer.get_bookmark())
-    client.download_file(remote_path, local_path, callback=self.progress)
+    failed = False
+
+    try:
+      # Download file
+      client.download_file(remote_path, local_path, callback=self.progress)
+
+      # Verify file
+      remote_hash = client.hash_file(remote_path)
+      local_hash = self.hash_file(local_path)
+      transfer.verified = remote_hash != "" and local_hash == remote_hash
+      print "transfer:checkhash {} {}".format(remote_hash, local_hash)
+
+    except Exception as e:
+      print "transfer:failed {}".format(e)
+      failed = True
+
     client.close()
     self.init_transfer()
 
-    transfer.complete()
+    transfer.complete(failed=failed)
     self.queue.complete(transfer)
 
     print "transferred {}".format(transfer.to_json())
+
+  def hash_file(self, local_path):
+    BUF_SIZE = 65536 # 64kb
+
+    sha1 = hashlib.sha1()
+
+    with open(local_path, "rb") as f:
+      while True:
+        data = f.read(BUF_SIZE)
+        if not data:
+          break
+        sha1.update(data)
+
+    return sha1.hexdigest()
 
   def progress(self, bytes, total_bytes):
     percent = bytes / total_bytes

@@ -12,9 +12,11 @@ class Transfer:
     self.completed = False
     self.failed = False
     self.canceled = False
+    self.verified = False
     self.transferred = 0
     self.size = 0
     self.rate = 0
+    self.hash = ""
 
   def is_ready(self):
     if self.completed: return False
@@ -51,6 +53,7 @@ class Transfer:
       "completed": self.completed,
       "failed": self.failed,
       "canceled": self.canceled,
+      "verified": self.verified,
       "transferred": self.transferred,
       "size": self.size,
       "rate": self.rate,

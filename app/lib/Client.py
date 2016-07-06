@@ -65,6 +65,20 @@ class Client:
 
     return files
 
+  def hash_file(self, remote_path):
+    print "client:hash_file {} {}".format(self.bookmark.host, remote_path)
+    self.open()
+
+    hash = ""
+
+    with self.sftp.open(remote_path, "rb") as remote_file:
+      try:
+        hash = remote_file.check("sha1")
+      except Exception as e:
+        print "client:hash_file exception {}".format(e)
+
+    return hash
+
   def download_file(self, remote_path, local_path, callback=None, buffer=32768, prefetch=50):
     print "client:download {} {}".format(self.bookmark.host, remote_path)
     self.open()
