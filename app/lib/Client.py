@@ -61,6 +61,8 @@ class Client:
     else:
       files.append(path)
 
+    files.sort()
+
     return files
 
   def download_file(self, remote_path, local_path, callback=None, buffer=32768, prefetch=50):
