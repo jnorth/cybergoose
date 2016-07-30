@@ -50,16 +50,10 @@ class Worker(threading.Thread):
 
     remote_path = transfer.get_remote_path()
     local_path = os.path.join("/data", transfer.get_path())
-    local_dir = os.path.dirname(local_path)
 
-    # TODO replace with `os.makedirs(path, exist_ok=True)` in python 3.2
-    try:
-      os.makedirs(local_dir)
-    except OSError as exc:
-      if exc.errno == errno.EEXIST and os.path.isdir(local_dir):
-        pass
-      else:
-        raise
+    # Create local directories if needed
+    local_dir = os.path.dirname(local_path)
+    os.makedirs(local_dir, exist_ok=True)
 
     self.init_transfer(transfer)
     client = Client(transfer.get_bookmark())
