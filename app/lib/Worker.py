@@ -99,21 +99,7 @@ class Worker(threading.Thread):
     self.current_transfer.progress = percent
     self.current_transfer.transferred = bytes
     self.current_transfer.size = total_bytes
-    self.current_transfer.rate = self.size(self.rate)
+    self.current_transfer.rate = self.rate
 
     if self.current_transfer.canceled:
       return True
-
-    print("transfer {0} {1:.0f}% of {2} {3}/s".format(
-      os.path.basename(self.current_transfer.path),
-      percent * 100,
-      self.size(total_bytes),
-      self.size(self.rate),
-    ))
-
-  def size(self, num, suffix="B"):
-    for unit in ['','K','M','G','T','P','E','Z']:
-      if abs(num) < 1024.0:
-        return "%3.1f %s%s" % (num, unit, suffix)
-      num /= 1024.0
-    return "%.1f %s%s" % (num, 'Y', suffix)

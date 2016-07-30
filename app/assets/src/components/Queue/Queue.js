@@ -82,7 +82,7 @@ function queueItemSubtitle(item) {
     // Rate
     elif(isActive, div)({
       className: 'queue-item-rate',
-      content: `${item.rate}/s`,
+      content: `${filesize(item.rate)}/s`,
     }),
   ];
 }

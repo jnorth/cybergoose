@@ -15002,7 +15002,7 @@ $__System.register('10e', ['48', '3d', '3c', '3b', '10d'], function (_export) {
     // Rate
     elif(isActive, div)({
       className: 'queue-item-rate',
-      content: item.rate + '/s'
+      content: filesize(item.rate) + '/s'
     })];
   }
 
