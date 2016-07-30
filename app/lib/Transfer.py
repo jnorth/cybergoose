@@ -8,21 +8,27 @@ class Transfer:
     self.bookmark = bookmark
     self.base_path = base_path
     self.path = path
+    self.size = 0
+    self.rate = 0
+    self.hash = ""
+
+    self.reset()
+
+  def is_ready(self):
+    if self.claimed: return False
+    if self.completed: return False
+    if self.failed: return False
+    if self.canceled: return False
+    return True
+
+  def reset(self):
     self.progress = 0.0
+    self.claimed = False
     self.completed = False
     self.failed = False
     self.canceled = False
     self.verified = False
     self.transferred = 0
-    self.size = 0
-    self.rate = 0
-    self.hash = ""
-
-  def is_ready(self):
-    if self.completed: return False
-    if self.failed: return False
-    if self.canceled: return False
-    return True
 
   def get_bookmark(self):
     return self.bookmark
@@ -41,6 +47,9 @@ class Transfer:
     self.progress = 1.0
     self.completed = True
     self.failed = failed
+
+  def cancel(self):
+    self.canceled = True
 
   def to_json(self):
     return {

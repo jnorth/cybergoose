@@ -24,14 +24,10 @@ class Worker(threading.Thread):
     print("starting worker {0}".format(self.id))
 
     while not self.stop_event.isSet():
-      transfer = next(self.queue)
+      transfer = self.queue.claim()
 
       if transfer:
-        if transfer.is_ready():
-          self.queue.activate(transfer)
-          self.process(transfer)
-        else:
-          self.queue.complete(transfer)
+        self.process(transfer)
 
       self.stop_event.wait(self.sleep_period)
 
@@ -77,7 +73,6 @@ class Worker(threading.Thread):
     self.init_transfer()
 
     transfer.complete(failed=failed)
-    self.queue.complete(transfer)
 
     print("transferred {}".format(transfer.to_json()))
 
