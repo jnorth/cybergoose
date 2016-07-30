@@ -1703,6 +1703,18 @@ $__System.register('39', ['5', '7', '8', '9', '10', '11', '37', 'b', 'c', 'd', '
               return _this4.queue.fetch();
             });
           }
+        }, {
+          key: 'retryTransfer',
+          value: function retryTransfer(transfer) {
+            var _this5 = this;
+
+            var body = new FormData();
+            body.append('transfer_id', transfer.id);
+
+            sync.post('/downloads/retry', body).then(function (response) {
+              return _this5.queue.fetch();
+            });
+          }
         }], null, _instanceInitializers);
 
         return Application;
@@ -14929,13 +14941,27 @@ $__System.register('10e', ['48', '3d', '3c', '3b', '10d'], function (_export) {
   }
 
   function queueItemActions(app, item) {
+    var actions = [];
+
     if (!item.failed && !item.canceled && !item.completed) {
-      return [{ name: 'Cancel', handler: function handler(event) {
+      actions.push({
+        name: 'Cancel',
+        handler: function handler(event) {
           return app.cancelTransfer(item);
-        } }];
-    } else {
-      return [];
+        }
+      });
     }
+
+    if (item.failed || item.canceled) {
+      actions.push({
+        name: 'Retry',
+        handler: function handler(event) {
+          return app.retryTransfer(item);
+        }
+      });
+    }
+
+    return actions;
   }
 
   function queueItemSubtitle(item) {
@@ -15020,7 +15046,6 @@ $__System.register('10e', ['48', '3d', '3c', '3b', '10d'], function (_export) {
     execute: function () {
       div = dom(React, 'div');
       listItem = dom(React, ListItemView);
-      ;
     }
   };
 });

@@ -77,4 +77,12 @@ export default class Application extends Store {
     sync.del('/downloads', body)
       .then(response => this.queue.fetch());
   }
+
+  retryTransfer(transfer) {
+    const body = new FormData();
+    body.append('transfer_id', transfer.id);
+
+    sync.post('/downloads/retry', body)
+      .then(response => this.queue.fetch());
+  }
 }

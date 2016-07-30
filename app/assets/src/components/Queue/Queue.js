@@ -10,7 +10,7 @@ const listItem = dom(React, ListItemView);
 
 function basename(str) {
   return str.substr(str.lastIndexOf('/') + 1);
-};
+}
 
 function queueItemStatus(item) {
   if (item.failed) return 'Failed';
@@ -25,13 +25,23 @@ function queueItemIsActive(item) {
 }
 
 function queueItemActions(app, item) {
+  const actions = [];
+
   if (!item.failed && !item.canceled && !item.completed) {
-    return [
-      { name: 'Cancel', handler: event => app.cancelTransfer(item) }
-    ];
-  } else {
-    return [];
+    actions.push({
+      name: 'Cancel',
+      handler: event => app.cancelTransfer(item),
+    });
   }
+
+  if (item.failed || item.canceled) {
+    actions.push({
+      name: 'Retry',
+      handler: event => app.retryTransfer(item),
+    });
+  }
+
+  return actions;
 }
 
 function queueItemSubtitle(item) {

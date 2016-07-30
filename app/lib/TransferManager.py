@@ -49,6 +49,19 @@ class TransferManager:
     if canceled_item:
       self.complete(canceled_item)
 
+  def retry(self, transfer_id):
+    for transfer in self.all():
+      if transfer.id == transfer_id:
+        transfer.canceled = False
+        transfer.failed = False
+        transfer.completed = False
+        transfer.verified = False
+
+        if transfer in self.active:
+          self.active.remove(active)
+
+        self.queue.put(transfer)
+
   def stop_workers(self):
     for worker in self.workers:
       worker.stop()

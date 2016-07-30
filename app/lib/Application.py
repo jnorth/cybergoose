@@ -59,6 +59,9 @@ class Application:
   def cancelTransfer(self, transfer_id):
     self.queue.cancel(transfer_id)
 
+  def retryTransfer(self, transfer_id):
+    self.queue.retry(transfer_id)
+
   def queued(self):
     return self.queue.all()
 
