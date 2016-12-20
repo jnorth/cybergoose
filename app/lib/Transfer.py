@@ -1,6 +1,26 @@
 import os
 import uuid
+import time
 from .Client import Client
+
+class TransferPart:
+  def __init__(self):
+    self.progress = 0.0
+    self.size = 0
+    self.transferred = 0
+    self.rate = 0
+    self.start_time = time.time()
+
+  def report_progress(self, bytes, total_bytes):
+    percent = bytes / total_bytes
+
+    bps = bytes / (time.time() - self.start_time)
+    self.rate += (bps - self.rate) / 5;
+
+    self.progress = percent
+    self.transferred = bytes
+    self.size = total_bytes
+    self.rate = self.rate
 
 class Transfer:
   def __init__(self, bookmark=None, base_path=None, path=None):
@@ -8,11 +28,16 @@ class Transfer:
     self.bookmark = bookmark
     self.base_path = base_path
     self.path = path
-    self.size = 0
-    self.rate = 0
     self.hash = ""
+    self.parts = []
 
     self.reset()
+
+  def report_progress(self, part_index, bytes, total_bytes):
+    while len(self.parts) < part_index + 1:
+      self.parts.append(TransferPart())
+
+    self.parts[part_index].report_progress(bytes, total_bytes)
 
   def is_ready(self):
     if self.claimed: return False
@@ -22,13 +47,12 @@ class Transfer:
     return True
 
   def reset(self):
-    self.progress = 0.0
     self.claimed = False
     self.completed = False
     self.failed = False
     self.canceled = False
     self.verified = False
-    self.transferred = 0
+    self.parts = []
 
   def get_bookmark(self):
     return self.bookmark
@@ -40,11 +64,10 @@ class Transfer:
     base = os.path.dirname(self.base_path)
     return os.path.relpath(self.path, base)
 
-  def get_progress(self):
-    return self.progress
+  def get_parts_progress(self):
+    return [vars(part) for part in self.parts]
 
   def complete(self, failed=False):
-    self.progress = 1.0
     self.completed = True
     self.failed = failed
 
@@ -58,12 +81,9 @@ class Transfer:
       "host": self.bookmark.host,
       "base": self.base_path,
       "path": self.path,
-      "progress": self.progress,
       "completed": self.completed,
       "failed": self.failed,
       "canceled": self.canceled,
       "verified": self.verified,
-      "transferred": self.transferred,
-      "size": self.size,
-      "rate": self.rate,
+      "progress": self.get_parts_progress(),
     }

@@ -79,7 +79,21 @@ class Client:
 
     return hash
 
-  def download_file(self, remote_path, local_path, callback=None, buffer=32768, prefetch=50):
+  def filesize(self, remote_path):
+    self.open()
+
+    # Open remote file
+    with self.sftp.open(remote_path, "rb") as remote_file:
+      return remote_file.stat().st_size
+
+  def seekable(self, remote_path):
+    self.open()
+
+    # Open remote file
+    with self.sftp.open(remote_path, "rb") as remote_file:
+      return remote_file.seekable()
+
+  def download_file(self, remote_path, local_path, part=None, callback=None, buffer=32768, prefetch=50):
     print("client:download {} {}".format(self.bookmark.host, remote_path))
     self.open()
 
@@ -88,26 +102,44 @@ class Client:
 
       # Open remote file
       with self.sftp.open(remote_path, "rb") as remote_file:
-        total_bytes = remote_file.stat().st_size
+        total_bytes = part["length"] if part else remote_file.stat().st_size
+        offset = part["offset"] if part else 0
         transferred_bytes = 0
         active = True
 
+        # Seek to starting offset
+        if offset > 0:
+          print("client:download:seek {}".format(offset))
+          remote_file.seek(offset)
+
+        # Download chunks
         while active:
-          chunks = self.next_chunks(total_bytes, transferred_bytes, buffer, prefetch)
+          chunks = self.next_chunks(offset + total_bytes, offset + transferred_bytes, buffer, prefetch)
           if len(chunks) < 1: break
 
           for data in remote_file.readv(chunks):
             local_file.write(data)
-            transferred_bytes += len(data)
+            bytes_read = len(data)
+            transferred_bytes += bytes_read
 
             if callback is not None:
-              should_stop = callback(transferred_bytes, total_bytes)
+              should_stop = callback(part, transferred_bytes, total_bytes)
               if should_stop: active = False
 
             if len(data) == 0:
               break
 
-  def next_chunks(self, total_bytes, offset, chunk_size, chunk_count):
-    chunks_remaining = int(ceil(float(total_bytes - offset) / chunk_size))
-    num = min(chunk_count, chunks_remaining)
-    return [(offset + (chunk_size * i), chunk_size) for i in range(num)]
+  def next_chunks(self, total_bytes, offset, chunk_size, limit):
+    chunks = []
+
+    while True:
+      if len(chunks) >= limit: break
+
+      bytes_remaining = max(0, total_bytes - offset)
+      if bytes_remaining == 0: break
+
+      length = min(chunk_size, bytes_remaining)
+      chunks.append((offset, length))
+      offset += length
+
+    return chunks

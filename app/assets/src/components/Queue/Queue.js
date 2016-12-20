@@ -20,8 +20,27 @@ function queueItemStatus(item) {
   return 'Queued';
 }
 
+function queueItemProgress(item, prop) {
+  return item.progress.reduce((total, part) => {
+    return part.size == part.transferred
+      ? total
+      : total + part[prop];
+  }, 0);
+}
+
+function queueItemProgressSize(item, prop) {
+  return filesize(queueItemProgress(item, prop));
+}
+
+function queueItemProgressPercentage(item) {
+  const transferred = queueItemProgress(item, 'transferred');
+  const size = queueItemProgress(item, 'size');
+  return ((transferred / size) * 100).toFixed(2);
+}
+
 function queueItemIsActive(item) {
-  return item.transferred > 0 && (!item.failed && !item.canceled && !item.completed);
+  const transferred = queueItemProgress(item, 'transferred');
+  return transferred > 0 && (!item.failed && !item.canceled && !item.completed);
 }
 
 function queueItemActions(app, item) {
@@ -46,7 +65,7 @@ function queueItemActions(app, item) {
 
 function queueItemSubtitle(item) {
   const isActive = queueItemIsActive(item);
-  const percentage = ((item.transferred / item.size) * 100).toFixed(2);
+  const percentage = queueItemProgressPercentage(item);
 
   return [
     // Status
@@ -64,25 +83,25 @@ function queueItemSubtitle(item) {
     // Transferred - active download
     elif(isActive && !item.completed, div)({
       className: 'queue-item-filesize',
-      content: `${filesize(item.transferred)} of ${filesize(item.size)}`,
+      content: `${queueItemProgressSize(item, 'transferred')} of ${queueItemProgressSize(item, 'size')}`,
     }),
 
     // Transferred - completed
     elif(item.transferred && !isActive && item.completed && !item.canceled && !item.failed, div)({
       className: 'queue-item-filesize',
-      content: filesize(item.size),
+      content: queueItemProgressSize(item, 'size'),
     }),
 
     // Transferred - other
     elif(item.transferred && !isActive && (item.canceled || item.failed), div)({
       className: 'queue-item-filesize',
-      content: filesize(item.transferred),
+      content: queueItemProgressSize(item, 'transferred'),
     }),
 
     // Rate
     elif(isActive, div)({
       className: 'queue-item-rate',
-      content: `${filesize(item.rate)}/s`,
+      content: `${queueItemProgressSize(item, 'rate')}/s`,
     }),
   ];
 }
@@ -95,9 +114,9 @@ export default function Queue({ app }) {
     children: queue.state.map(item => listItem({
       key: `queue-${item.id}`,
       title: basename(item.path),
-      progress: (queueItemIsActive(item) ? item.progress : undefined),
       actions: queueItemActions(app, item),
       subtitle: queueItemSubtitle(item),
+      progress: (queueItemIsActive(item) ? item.progress : []),
       className: classnames('queue-item', {
         'failed': item.failed,
         'canceled': item.canceled,

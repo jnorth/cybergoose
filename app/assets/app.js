@@ -14863,10 +14863,11 @@ $__System.register('10d', ['3d', '3c', '3b'], function (_export) {
   _export('default', ListItemView);
 
   function ListItemView(props) {
+    var item = props.item;
     var icon = elif(props.icon, div);
     var subtitle = elif(props.subtitle, div);
     var actions = elif(props.actions, div);
-    var progress = elif(props.progress !== undefined, div);
+    var progress = elif(props.progress.length, div);
 
     return div({
       key: props.key,
@@ -14894,9 +14895,14 @@ $__System.register('10d', ['3d', '3c', '3b'], function (_export) {
         })
       }), progress({
         className: 'listitem-progress',
-        content: div({
-          className: 'listitem-progress-bar',
-          style: { width: props.progress * 100 + '%' }
+        content: props.progress.map(function (part, index) {
+          return div({
+            className: 'listitem-progress-bar',
+            style: {
+              width: part.progress * 100 / props.progress.length + '%',
+              left: index / props.progress.length * 100 + '%'
+            }
+          });
         })
       })]
     });
@@ -14936,8 +14942,25 @@ $__System.register('10e', ['48', '3d', '3c', '3b', '10d'], function (_export) {
     return 'Queued';
   }
 
+  function queueItemProgress(item, prop) {
+    return item.progress.reduce(function (total, part) {
+      return part.size == part.transferred ? total : total + part[prop];
+    }, 0);
+  }
+
+  function queueItemProgressSize(item, prop) {
+    return filesize(queueItemProgress(item, prop));
+  }
+
+  function queueItemProgressPercentage(item) {
+    var transferred = queueItemProgress(item, 'transferred');
+    var size = queueItemProgress(item, 'size');
+    return (transferred / size * 100).toFixed(2);
+  }
+
   function queueItemIsActive(item) {
-    return item.transferred > 0 && !item.failed && !item.canceled && !item.completed;
+    var transferred = queueItemProgress(item, 'transferred');
+    return transferred > 0 && !item.failed && !item.canceled && !item.completed;
   }
 
   function queueItemActions(app, item) {
@@ -14966,7 +14989,7 @@ $__System.register('10e', ['48', '3d', '3c', '3b', '10d'], function (_export) {
 
   function queueItemSubtitle(item) {
     var isActive = queueItemIsActive(item);
-    var percentage = (item.transferred / item.size * 100).toFixed(2);
+    var percentage = queueItemProgressPercentage(item);
 
     return [
     // Status
@@ -14984,25 +15007,25 @@ $__System.register('10e', ['48', '3d', '3c', '3b', '10d'], function (_export) {
     // Transferred - active download
     elif(isActive && !item.completed, div)({
       className: 'queue-item-filesize',
-      content: filesize(item.transferred) + ' of ' + filesize(item.size)
+      content: queueItemProgressSize(item, 'transferred') + ' of ' + queueItemProgressSize(item, 'size')
     }),
 
     // Transferred - completed
     elif(item.transferred && !isActive && item.completed && !item.canceled && !item.failed, div)({
       className: 'queue-item-filesize',
-      content: filesize(item.size)
+      content: queueItemProgressSize(item, 'size')
     }),
 
     // Transferred - other
     elif(item.transferred && !isActive && (item.canceled || item.failed), div)({
       className: 'queue-item-filesize',
-      content: filesize(item.transferred)
+      content: queueItemProgressSize(item, 'transferred')
     }),
 
     // Rate
     elif(isActive, div)({
       className: 'queue-item-rate',
-      content: filesize(item.rate) + '/s'
+      content: queueItemProgressSize(item, 'rate') + '/s'
     })];
   }
 
@@ -15016,9 +15039,9 @@ $__System.register('10e', ['48', '3d', '3c', '3b', '10d'], function (_export) {
         return listItem({
           key: 'queue-' + item.id,
           title: basename(item.path),
-          progress: queueItemIsActive(item) ? item.progress : undefined,
           actions: queueItemActions(app, item),
           subtitle: queueItemSubtitle(item),
+          progress: queueItemIsActive(item) ? item.progress : [],
           className: classnames('queue-item', {
             'failed': item.failed,
             'canceled': item.canceled,

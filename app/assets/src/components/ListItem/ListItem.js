@@ -6,10 +6,11 @@ const div = dom(React, 'div');
 const button = dom(React, 'button');
 
 export default function ListItemView(props) {
+  const item = props.item;
   const icon = elif(props.icon, div);
   const subtitle = elif(props.subtitle, div);
   const actions = elif(props.actions, div);
-  const progress = elif(props.progress !== undefined, div);
+  const progress = elif(props.progress.length, div);
 
   return div({
     key: props.key,
@@ -46,10 +47,13 @@ export default function ListItemView(props) {
 
       progress({
         className: 'listitem-progress',
-        content: div({
+        content: props.progress.map((part, index) => div({
           className: 'listitem-progress-bar',
-          style: { width: `${props.progress * 100}%` },
-        }),
+          style: {
+            width: `${part.progress * 100 / props.progress.length}%`,
+            left: `${index / props.progress.length * 100}%`,
+          },
+        })),
       }),
 
     ],
